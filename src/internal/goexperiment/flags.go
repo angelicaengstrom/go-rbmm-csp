@@ -124,4 +124,8 @@ type Flags struct {
 
 	// Synctest enables the testing/synctest package.
 	Synctest bool
+
+	// Regions causes the "region" standard library package to be visible
+	// to the outside world.
+	Regions bool
 }
