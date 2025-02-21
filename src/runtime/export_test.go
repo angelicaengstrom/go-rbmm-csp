@@ -1764,6 +1764,18 @@ func UserArenaClone[T any](s T) T {
 	return arena_heapify(s).(T)
 }
 
+type UserRegion struct {
+	region *userRegion
+}
+
+func CreateUserRegion() *UserRegion {
+	return &UserRegion{createUserRegion()}
+}
+
+func (r *UserRegion) GetSize() uintptr {
+	return r.region.current.elemsize
+}
+
 var AlignUp = alignUp
 
 func BlockUntilEmptyFinalizerQueue(timeout int64) bool {
