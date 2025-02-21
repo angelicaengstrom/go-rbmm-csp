@@ -183,15 +183,6 @@ type mheap struct {
 	// then release mheap_.lock.
 	userArenaArenas []arenaIdx
 
-	// userRegionRegions is the arenaIndex of every mapped arena mapped for
-	// user arenas.
-	//
-	// Access is protected by mheap_.lock. However, since this is
-	// append-only and old backing arrays are never freed, it is
-	// safe to acquire mheap_.lock, copy the slice header, and
-	// then release mheap_.lock.
-	userRegionRegions []arenaIdx
-
 	// sweepArenas is a snapshot of heapArenas taken at the
 	// beginning of the sweep cycle. This can be read safely by
 	// simply blocking GC (by disabling preemption).
@@ -247,17 +238,6 @@ type mheap struct {
 
 		// readyList is a list of empty user arena spans that are ready for reuse.
 		readyList mSpanList
-	}
-
-	// User region state.
-	//
-	// Protected by mheap_.lock.
-	userRegion struct {
-		// arenaHints is a list of addresses at which to attempt to
-		// add more heap arenas for user arena chunks. This is initially
-		// populated with a set of general hint addresses, and grown with
-		// the bounds of actual heap arena ranges.
-		arenaHints *arenaHint
 	}
 
 	// cleanupID is a counter which is incremented each time a cleanup special is added

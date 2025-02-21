@@ -1772,8 +1772,16 @@ func CreateUserRegion() *UserRegion {
 	return &UserRegion{createUserRegion()}
 }
 
+func (r *UserRegion) RemoveUserRegion() {
+	r.region.removeRegion()
+}
+
 func (r *UserRegion) GetSize() uintptr {
 	return r.region.current.elemsize
+}
+
+func (r *UserRegion) GetBlock() *mspan {
+	return r.region.current
 }
 
 var AlignUp = alignUp

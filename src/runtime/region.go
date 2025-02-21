@@ -113,33 +113,47 @@ func region_allocFromRegion(region unsafe.Pointer, typ any) any {
 //
 //go:linkname region_removeRegion region.runtime_region_removeRegion
 func region_removeRegion(region unsafe.Pointer) {
-
+	((*userRegion)(region)).removeRegion()
 }
 
+const (
+	// regionBlockBytes is the size of a user region block.
+	regionBlockBytesMax = 8 << 20
+	regionBlockBytes    = uintptr(int64(regionBlockBytesMax-heapArenaBytes)&(int64(regionBlockBytesMax-heapArenaBytes)>>63) + heapArenaBytes) // min(regionBlockBytesMax, heapArenaBytes)
+
+	// regionBlockPages is the number of pages a user region block uses.
+	regionBlockPages = regionBlockBytes / pageSize
+
+	// regionBlockMaxAllocBytes is the maximum size of an object that can
+	// be allocated from a region. This number is chosen to cap worst-case
+	// fragmentation of user regions to 25%. Larger allocations are redirected
+	// to the heap.
+	regionBlockMaxAllocBytes = regionBlockBytes / 4
+)
+
 func init() {
-	if userArenaChunkPages*pageSize != userArenaChunkBytes {
+	if regionBlockPages*pageSize != regionBlockBytes {
 		throw("user arena chunk size is not a multiple of the page size")
 	}
-	if userArenaChunkBytes%physPageSize != 0 {
+	if regionBlockBytes%physPageSize != 0 {
 		throw("user arena chunk size is not a multiple of the physical page size")
 	}
-	if userArenaChunkBytes < heapArenaBytes {
-		if heapArenaBytes%userArenaChunkBytes != 0 {
+	if regionBlockBytes < heapArenaBytes {
+		if heapArenaBytes%regionBlockBytes != 0 {
 			throw("user arena chunk size is smaller than a heap arena, but doesn't divide it")
 		}
 	} else {
-		if userArenaChunkBytes%heapArenaBytes != 0 {
+		if regionBlockBytes%heapArenaBytes != 0 {
 			throw("user arena chunks size is larger than a heap arena, but not a multiple")
 		}
 	}
-	lockInit(&userArenaState.lock, lockRankUserArenaState)
 }
 
 type userRegion struct {
 	// current is the user region block we're currently allocating into.
 	current *mspan
 
-	// defunct is true if free has been called on this arena.
+	// defunct is true if free has been called on this region.
 	//
 	// This is just a best-effort way to discover a concurrent allocation
 	// and free. Also used to detect a double-free.
@@ -152,19 +166,19 @@ func createUserRegion() *userRegion {
 	r := new(userRegion)
 	SetFinalizer(r, func(r *userRegion) {
 		// If region handle is dropped without being freed, then call
-		// free on the region, so the arena chunks are never reclaimed
+		// free on the region, so the region chunks are never reclaimed
 		// by the garbage collector.
-		//r.free()
+		r.removeRegion()
 	})
-	r.current = newUserRegionBlock()
+	r.current = newRegionBlock()
 
 	return r
 }
 
-func newUserRegionBlock() *mspan {
+func newRegionBlock() *mspan {
 	var span *mspan
 	systemstack(func() {
-		span = mheap_.allocUserRegionBlock()
+		span = mheap_.allocRegionBlock()
 	})
 	if span == nil {
 		throw("out of memory")
@@ -172,25 +186,22 @@ func newUserRegionBlock() *mspan {
 	return span
 }
 
-func (h *mheap) allocUserRegionBlock() *mspan {
+func (h *mheap) allocRegionBlock() *mspan {
 	var s *mspan
 	var base uintptr
 
 	lock(&h.lock)
-	hintList := &h.userRegion.arenaHints
-	v, size := h.sysAlloc(userArenaChunkBytes, hintList, &mheap_.userRegionRegions)
-	if size%userArenaChunkBytes != 0 {
+	v, size := h.sysAlloc(regionBlockBytes, &mheap_.userArena.arenaHints, &mheap_.userArenaArenas) // Allocates heap arena space, returns memory region in reserved state
+	if size%regionBlockBytes != 0 {
 		throw("sysAlloc size is not divisible by userArenaChunkBytes")
 	}
-	if size > userArenaChunkBytes {
+	if size > regionBlockBytes {
 		// We got more than we asked for. This can happen if
-		// heapArenaSize > userArenaChunkSize, or if sysAlloc just returns
+		// heapArenaSize > regionBlockBytes, or if sysAlloc just returns
 		// some extra as a result of trying to find an aligned region.
 		//
-		// Divide it up and put it on the ready list.
-		s := h.allocMSpanLocked()
-		s.init(uintptr(v)+userArenaChunkBytes, userArenaChunkPages)
-		size = userArenaChunkBytes
+		// TODO: Divide it up and put it on the local free list.
+		size = regionBlockBytes
 	}
 	base = uintptr(v)
 	if base == 0 {
@@ -198,8 +209,11 @@ func (h *mheap) allocUserRegionBlock() *mspan {
 		unlock(&h.lock)
 		return nil
 	}
-	s = h.allocMSpanLocked()
+	s = h.allocMSpanLocked() // Allocates a mspan object, but h.lock must be held
 	unlock(&h.lock)
+
+	//TODO: Continue Here
+	// What is reserved state? What more states are there? Why do we need to transition it?
 
 	// sysAlloc returns Reserved address space, and any span we're
 	// reusing is set to fault (so, also Reserved), so transition
@@ -274,21 +288,21 @@ func (h *mheap) allocUserRegionBlock() *mspan {
 }
 
 // createUserRegion creates a new userRegion ready to be used.
-func (a *userRegion) removeRegion() {
-	if a.defunct.Load() {
-		panic("arena double free")
+func (r *userRegion) removeRegion() {
+	if r.defunct.Load() {
+		panic("region double free")
 	}
 
 	// Mark ourselves as defunct.
-	a.defunct.Store(true)
-	SetFinalizer(a, nil)
+	r.defunct.Store(true)
+	SetFinalizer(r, nil)
 
-	s := a.current
+	s := r.current
 	if s != nil {
 		freeUserRegionBlock(s, unsafe.Pointer(s.base()))
 	}
 	// nil out a.active so that a race with freeing will more likely cause a crash.
-	a.current = nil
+	r.current = nil
 }
 
 // freeUserArenaChunk releases the user arena represented by s back to the runtime.

@@ -21,6 +21,11 @@ func TestCreateRegion(t *testing.T) {
 		if UserArenaChunkBytes == region.GetSize() {
 			t.Errorf("CreateUserRegion() should have size equal to UserArenaChunkBytes, currently %d", uint64(region.GetSize()))
 		}
+
+		_, memStats := ReadMemStatsSlow()
+		if memStats.HeapAlloc < uint64(UserArenaChunkBytes) {
+			t.Errorf("CreateUserRegion() wasn't able to allocate a region-block on the heap")
+		}
 	})
 }
 
@@ -61,5 +66,26 @@ func runSubTestAllocRegion[S comparable](t *testing.T, value *S, parallel bool) 
 }
 
 func TestDeallocRegion(t *testing.T) {
+	// Set GOMAXPROCS to 2 so we don't run too many of these
+	// tests in parallel.
+	defer GOMAXPROCS(GOMAXPROCS(2))
+	// Start a subtest so that we can clean up after any parallel tests within.
+	t.Run("Dealloc", func(t *testing.T) {
+		_, stat := ReadMemStatsSlow()
+		t.Log(stat)
+		region := CreateUserRegion()
+		_, stat = ReadMemStatsSlow()
+		t.Log(UserArenaChunkBytes)
+		t.Log(stat)
+		region.RemoveUserRegion()
+		_, memStats := ReadMemStatsSlow()
+		t.Log(memStats)
+		if region.GetBlock() != nil {
+			t.Errorf("RemoveUserRegion() should have nil region")
+		}
 
+		if memStats.HeapAlloc > uint64(UserArenaChunkBytes) {
+			t.Errorf("RemoveUserRegion() wasn't able to deallocate a region-block on the heap")
+		}
+	})
 }
