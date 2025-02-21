@@ -6,6 +6,11 @@
 
 package region_test
 
+import (
+	"region"
+	"testing"
+)
+
 type T1 struct {
 	n int
 }

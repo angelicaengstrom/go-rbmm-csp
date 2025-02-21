@@ -50,17 +50,17 @@ func CreateRegion() *Region {
 	return &Region{r: runtime_region_createRegion()}
 }
 
-// Free frees the arena (and all objects allocated from the arena) so that
-// memory backing the arena can be reused fairly quickly without garbage
+// RemoveRegion frees the region (and all objects allocated from the region) so that
+// memory backing the region can be reused fairly quickly without garbage
 // collection overhead. Applications must not call any method on this
-// arena after it has been freed.
+// region after it has been freed.
 func (r *Region) RemoveRegion() {
 	runtime_region_removeRegion(r.r)
 	r.r = nil
 }
 
-// New creates a new *T in the provided arena. The *T must not be used after
-// the arena is freed. Accessing the value after free may result in a fault,
+// AllocFromRegion creates a new *T in the provided region. The *T must not be used after
+// the region is freed. Accessing the value after free may result in a fault,
 // but this fault is also not guaranteed.
 func AllocFromRegion[T any](r *Region) *T {
 	return runtime_region_allocFromRegion(r.r, reflectlite.TypeOf((*T)(nil))).(*T)

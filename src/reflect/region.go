@@ -6,6 +6,8 @@
 
 package reflect
 
+import "region"
+
 // RegionAllocFromRegion returns a [Value] representing a pointer to a new zero value for the
 // specified type, allocating storage for it in the provided arena. That is,
 // the returned Value's Type is [PointerTo](typ).

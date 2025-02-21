@@ -104,7 +104,7 @@ func region_createRegion() unsafe.Pointer {
 // for a pointer to the type to actually be allocated, i.e. pass a *T
 // to allocate a T. This is necessary because this function returns a *T.
 //
-//go:linkname region_allocFromRegion arena.runtime_region_allocFromRegion
+//go:linkname region_allocFromRegion region.runtime_region_allocFromRegion
 func region_allocFromRegion(region unsafe.Pointer, typ any) any {
 	t := (*_type)(efaceOf(&typ).data)
 	if t.Kind_&abi.KindMask != abi.Pointer {
@@ -121,7 +121,26 @@ func region_allocFromRegion(region unsafe.Pointer, typ any) any {
 
 // region_removeRegion is a wrapper around (*userArena).free.
 //
-//go:linkname region_removeRegion arena.runtime_region_removeRegion
+//go:linkname region_removeRegion region.runtime_region_removeRegion
 func region_removeRegion(region unsafe.Pointer) {
 	((*userArena)(region)).free()
+}
+
+func init() {
+	if userArenaChunkPages*pageSize != userArenaChunkBytes {
+		throw("user arena chunk size is not a multiple of the page size")
+	}
+	if userArenaChunkBytes%physPageSize != 0 {
+		throw("user arena chunk size is not a multiple of the physical page size")
+	}
+	if userArenaChunkBytes < heapArenaBytes {
+		if heapArenaBytes%userArenaChunkBytes != 0 {
+			throw("user arena chunk size is smaller than a heap arena, but doesn't divide it")
+		}
+	} else {
+		if userArenaChunkBytes%heapArenaBytes != 0 {
+			throw("user arena chunks size is larger than a heap arena, but not a multiple")
+		}
+	}
+	lockInit(&userArenaState.lock, lockRankUserArenaState)
 }
