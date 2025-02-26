@@ -7,6 +7,7 @@
 package region_test
 
 import (
+	"fmt"
 	"region"
 	"testing"
 )
@@ -22,4 +23,25 @@ func TestSmokeLarge(t *testing.T) {
 	for i := 0; i < 10*64; i++ {
 		_ = region.AllocFromRegion[T2](a)
 	}
+}
+
+func TestNestledRegion(t *testing.T) {
+	outer := region.CreateRegion()
+	defer outer.RemoveRegion()
+
+	inner := region.AllocFromRegion[region.Region](outer)
+	inner = region.CreateRegion()
+	defer inner.RemoveRegion()
+
+	for i := 0; i < 10*64; i++ {
+		_ = region.AllocFromRegion[T2](inner)
+	}
+}
+
+func TestChannelRegion(t *testing.T) {
+	ch := region.CreateChannel[int](0)
+	go func() {
+		ch <- 1
+	}()
+	fmt.Println(<-ch)
 }

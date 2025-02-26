@@ -5,6 +5,7 @@
 package runtime_test
 
 import (
+	"internal/reflectlite"
 	"reflect"
 	. "runtime"
 	"testing"
@@ -18,7 +19,7 @@ func TestCreateRegion(t *testing.T) {
 	// Start a subtest so that we can clean up after any parallel tests within.
 	t.Run("Create", func(t *testing.T) {
 		region := CreateUserRegion()
-		if UserArenaChunkBytes == region.GetSize() {
+		if UserArenaChunkBytes != region.GetSize() {
 			t.Errorf("CreateUserRegion() should have size equal to UserArenaChunkBytes, currently %d", uint64(region.GetSize()))
 		}
 
@@ -37,6 +38,25 @@ func TestAllocRegion(t *testing.T) {
 	t.Run("Alloc", func(t *testing.T) {
 		ss := &smallScalar{5}
 		runSubTestAllocRegion(t, ss, false)
+
+		mse := new(mediumScalarEven)
+		for i := range mse {
+			mse[i] = 121
+		}
+		runSubTestAllocRegionFullList(t, mse, false)
+
+		mso := new(mediumScalarOdd)
+		for i := range mso {
+			mso[i] = 122
+		}
+		runSubTestUserArenaNew(t, mso, false)
+
+		runSubTestAllocNestledRegion(t, false)
+
+		runSubTestAllocChannel(t, false)
+
+		runSubTestAllocBufferedChannel(t, false)
+
 	})
 }
 
@@ -46,22 +66,139 @@ func runSubTestAllocRegion[S comparable](t *testing.T, value *S, parallel bool) 
 			t.Parallel()
 		}
 
-		// Allocate and write data, enough to exhaust the arena.
-		//
-		// This is an underestimate, likely leaving some space in the arena. That's a good thing,
-		// because it gives us coverage of boundary cases.
+		// Create a new region and do a bunch of operations on it.
+		region := CreateUserRegion()
+		//Assign new region
+		x := region.AllocateFromRegion(reflectlite.TypeOf((*S)(nil)))
+		if x == nil {
+			t.Errorf("AllocateFromRegion() wasn't able to allocate ")
+		}
+		// Release the region.
+		region.RemoveUserRegion()
+	})
+}
+
+func runSubTestAllocRegionFullList[S comparable](t *testing.T, value *S, parallel bool) {
+	t.Run(reflect.TypeOf(value).Elem().Name(), func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+
 		n := int(UserArenaChunkBytes / unsafe.Sizeof(*value))
 		if n == 0 {
 			n = 1
 		}
 
 		// Create a new region and do a bunch of operations on it.
-		//region := NewUserArena()
+		region := CreateUserRegion()
+		block1 := region.GetBlock() //First region block that we allocate to
 
-		//Assign new region
+		for j := 0; j < n+1; j++ {
+			x := region.AllocateFromRegion(reflectlite.TypeOf((*S)(nil)))
+			s := x.(*S)
+			*s = *value
+		}
+
+		// The current region block should now be in another span
+		block2 := region.GetBlock()
+
+		if block1 == block2 {
+			t.Errorf("runSubTestAllocRegionFullList() wasn't able to allocate a new region block")
+		}
+
+		_, memStats := ReadMemStatsSlow()
+		if memStats.HeapAlloc < uint64(UserArenaChunkBytes)*2 {
+			t.Errorf("runSubTestAllocRegionFullList() wasn't able to allocate multiple region-block on the heap")
+		}
 
 		// Release the region.
+		region.RemoveUserRegion()
 
+		_, memStats = ReadMemStatsSlow()
+		if memStats.HeapAlloc > uint64(UserArenaChunkBytes)*2 {
+			t.Errorf("runSubTestAllocRegionFullList() wasn't able to deallocate multiple region-block on the heap")
+		}
+	})
+}
+
+func runSubTestAllocNestledRegion(t *testing.T, parallel bool) {
+	t.Run("region.Region", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+
+		// Create a new outer region.
+		outer := CreateUserRegion()
+		inner := outer.AllocateFromRegion(reflectlite.TypeOf(&UserRegion{})).(*UserRegion)
+
+		inner = CreateUserRegion()
+		x := inner.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{5}))
+
+		if x == nil {
+			t.Errorf("runSubTestAllocNestledRegion() wasn't able to allocate ")
+		}
+
+		// Release the inner region before the outer
+		inner.RemoveUserRegion()
+
+		// Release the region.
+		outer.RemoveUserRegion()
+	})
+}
+
+func runSubTestAllocChannel(t *testing.T, parallel bool) {
+	t.Run("channel", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+
+		// Create a channel region.
+		ch, reg := CreateRegionChannel[int](0)
+		go func() {
+			ch <- 1
+		}()
+
+		if <-ch != 1 {
+			t.Errorf("CreateRegionChannel() wasn't able to allocate")
+		}
+		// Close the channel
+		close(ch)
+		reg.RemoveUserRegion()
+	})
+}
+
+func runSubTestAllocBufferedChannel(t *testing.T, parallel bool) {
+	t.Run("BufferedChannel", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+
+		n := int(UserArenaChunkBytes / unsafe.Sizeof(&mediumPointerEven{}))
+		if n == 0 {
+			n = 1
+		}
+		// Create a channel region.
+		sz := n
+		ch, reg := CreateRegionChannel[*mediumPointerEven](sz)
+		go func() {
+			region := CreateUserRegion()
+			mse := region.AllocateFromRegion(reflectlite.TypeOf(&mediumPointerEven{})).(*mediumPointerEven)
+
+			for i := range mse {
+				mse[i] = region.AllocateFromRegion(reflectlite.TypeOf(&smallPointer{})).(*smallPointer)
+			}
+			for i := 0; i < sz; i++ {
+				ch <- mse
+			}
+
+		}()
+		for i := 0; i < sz; i++ {
+			<-ch
+		}
+
+		// Close the channel
+		close(ch)
+		reg.RemoveUserRegion()
 	})
 }
 
@@ -71,20 +208,16 @@ func TestDeallocRegion(t *testing.T) {
 	defer GOMAXPROCS(GOMAXPROCS(2))
 	// Start a subtest so that we can clean up after any parallel tests within.
 	t.Run("Dealloc", func(t *testing.T) {
-		_, stat := ReadMemStatsSlow()
-		t.Log(stat)
 		region := CreateUserRegion()
-		_, stat = ReadMemStatsSlow()
-		t.Log(UserArenaChunkBytes)
-		t.Log(stat)
+		_, memStatsBefore := ReadMemStatsSlow()
 		region.RemoveUserRegion()
-		_, memStats := ReadMemStatsSlow()
-		t.Log(memStats)
+		_, memStatsAfter := ReadMemStatsSlow()
+
 		if region.GetBlock() != nil {
 			t.Errorf("RemoveUserRegion() should have nil region")
 		}
 
-		if memStats.HeapAlloc > uint64(UserArenaChunkBytes) {
+		if memStatsAfter.HeapAlloc > memStatsBefore.HeapAlloc+uint64(UserArenaChunkBytes) {
 			t.Errorf("RemoveUserRegion() wasn't able to deallocate a region-block on the heap")
 		}
 	})

@@ -1772,8 +1772,20 @@ func CreateUserRegion() *UserRegion {
 	return &UserRegion{createUserRegion()}
 }
 
+func (r *UserRegion) AllocateFromRegion(typ any) any {
+	return r.region.allocateFromRegion(typ)
+}
+
 func (r *UserRegion) RemoveUserRegion() {
 	r.region.removeRegion()
+}
+
+func CreateRegionChannel[T any](size int) (chan T, *UserRegion) {
+	region := createUserRegion()
+	var ch chan T
+	chPtr := (*uintptr)(unsafe.Pointer(&ch))
+	*chPtr = (uintptr)(unsafe.Pointer(region.makeChan(abi.TypeOf((*T)(nil)), size)))
+	return ch, &UserRegion{region: region}
 }
 
 func (r *UserRegion) GetSize() uintptr {
@@ -1782,6 +1794,14 @@ func (r *UserRegion) GetSize() uintptr {
 
 func (r *UserRegion) GetBlock() *mspan {
 	return r.region.current
+}
+
+func (r *UserRegion) GetBase() uintptr {
+	return r.region.current.userArenaChunkFree.base.addr()
+}
+
+func (r *UserRegion) GetLimit() uintptr {
+	return r.region.current.userArenaChunkFree.limit.addr()
 }
 
 var AlignUp = alignUp

@@ -220,6 +220,7 @@ type mheap struct {
 	specialWeakHandleAlloc fixalloc // allocator for specialWeakHandle
 	speciallock            mutex    // lock for special record allocators.
 	arenaHintAlloc         fixalloc // allocator for arenaHints
+	blockalloc             fixalloc
 
 	// User arena state.
 	//
@@ -406,6 +407,20 @@ type mSpanList struct {
 	_     sys.NotInHeap
 	first *mspan // first span in list, or nil if none
 	last  *mspan // last span in list, or nil if none
+}
+
+type mblock struct {
+	_    sys.NotInHeap
+	next *mblock // next span in list, or nil if none
+	prev *mblock // previous span in list, or nil if none
+
+	startAddr uintptr // address of first byte of span aka s.base()
+	npages    uintptr // number of pages in span
+
+	userRegionBlockFree addrRange // interval for managing chunk allocation
+	elemsize            uintptr   // computed from sizeclass or from npages
+	limit               uintptr   // end of data in span
+	needzero            uint8     // needs to be zeroed before allocation
 }
 
 type mspan struct {
@@ -765,6 +780,7 @@ func (h *mheap) init() {
 	h.specialPinCounterAlloc.init(unsafe.Sizeof(specialPinCounter{}), nil, nil, &memstats.other_sys)
 	h.specialWeakHandleAlloc.init(unsafe.Sizeof(specialWeakHandle{}), nil, nil, &memstats.gcMiscSys)
 	h.arenaHintAlloc.init(unsafe.Sizeof(arenaHint{}), nil, nil, &memstats.other_sys)
+	h.blockalloc.init(unsafe.Sizeof(mblock{}), nil, nil, &memstats.other_sys)
 
 	// Don't zero mspan allocations. Background sweeping can
 	// inspect a span concurrently with allocating it, so it's

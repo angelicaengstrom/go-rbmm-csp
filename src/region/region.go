@@ -1,4 +1,4 @@
-// Copyright 2022 The Go Authors. All rights reserved.
+// Copyright 2025 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -66,6 +66,13 @@ func AllocFromRegion[T any](r *Region) *T {
 	return runtime_region_allocFromRegion(r.r, reflectlite.TypeOf((*T)(nil))).(*T)
 }
 
+// CreateChannel creates a new chan in the provided region. The chan must not be used after
+// the region is freed. Accessing the value after free may result in a fault,
+// but this fault is also not guaranteed.
+func CreateChannel[T any](size int) T {
+	return runtime_region_createChannel(reflectlite.TypeOf((*T)(nil)), size).(chan T)
+}
+
 //go:linkname reflect_region_allocFromRegion reflect.region_allocFromRegion
 func reflect_region_allocFromRegion(r *Region, typ any) any {
 	return runtime_region_allocFromRegion(r.r, typ)
@@ -79,3 +86,6 @@ func runtime_region_allocFromRegion(region unsafe.Pointer, typ any) any
 
 //go:linkname runtime_region_removeRegion
 func runtime_region_removeRegion(region unsafe.Pointer)
+
+//go:linkname runtime_region_createChannel
+func runtime_region_createChannel(typ any, size int) any

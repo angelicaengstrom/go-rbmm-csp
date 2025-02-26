@@ -208,7 +208,7 @@ func main() {
 		}
 	}()
 
-	gcenable()
+	//gcenable()
 
 	main_init_done = make(chan bool)
 	if iscgo {
@@ -852,7 +852,7 @@ func schedinit() {
 	secure()
 	checkfds()
 	parsedebugvars()
-	gcinit()
+	//gcinit()
 
 	// Allocate stack space that can be used when crashing due to bad stack
 	// conditions, e.g. morestack on g0.
