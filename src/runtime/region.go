@@ -379,10 +379,6 @@ func (s *mspan) bump(typ *_type) unsafe.Pointer {
 	return ptr
 }
 
-const (
-	hchanHeader = 4
-)
-
 func (r *userRegion) makeChan(t *_type, size int) *hchan {
 	elem := t
 
@@ -399,46 +395,19 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 		panic(plainError("makechan: size out of range"))
 	}
 
+	//TODO: return the rest of the memory to the global free list, memory that we don't use
 	var c *hchan
 	switch {
 	case mem == 0:
-		// Queue or element size is zero.
-		c = (*hchan)(r.alloc(abi.TypeOf(&hchan{})))
-		// Race detector uses this location for synchronization.
+		//unbuffered channel
+		c = (*hchan)(r.alloc(abi.TypeOf(hchan{})))
 		c.buf = r.alloc(elem)
-	case !elem.Pointers():
-
-		//OBS: We will never enter this, as abi.TypeOf() manipulates elem.Pointers()
-		// Elements do not contain pointers.
-		// Allocate hchan and buf in one call.
-		c = (*hchan)(r.alloc(abi.TypeOf(&hchan{})))
-		c.buf = add(unsafe.Pointer(c), hchanSize)
 	default:
-		// Elements contain pointers.
-		c = (*hchan)(r.alloc(abi.TypeOf(&hchan{})))
-		print(unsafe.Sizeof(c.qcount) + unsafe.Sizeof(c.dataqsiz) + unsafe.Sizeof(c.elemsize) + unsafe.Sizeof(c.synctest) + unsafe.Sizeof(c.closed) + unsafe.Sizeof(c.sendx) + unsafe.Sizeof(c.sendx) + unsafe.Sizeof(c.recvx) + unsafe.Sizeof(c.elemtype) + unsafe.Sizeof(c.sendq) + unsafe.Sizeof(c.isregionblock) + unsafe.Sizeof(c.regionblock) + unsafe.Sizeof(c.recvq) + unsafe.Sizeof(c.refs))
-		print(unsafe.Sizeof(c), " size of channel \n")
-		print(c, " address of channel \n")
-		print(&c.qcount, " address of c.qcount \n")
-		print(&c.dataqsiz, " address of c.dataqsiz \n")
-		print(&c.buf, " address of c.buf \n")
-		print(&c.elemsize, " address of c.elemsize \n")
-		print(&c.synctest, " address of c.synctest \n")
-		print(&c.closed, " address of c.closed \n")
-		print(&c.timer, " address of c.timer \n")
-		print(&c.elemtype, " address of c.elemtype \n")
-		print(&c.sendx, " address of c.sendx \n")
-		print(&c.recvx, " address of c.recvx \n")
-		print(&c.sendq, " address of c.sendq \n")
-		print(&c.isregionblock, " address of c.isregionblock \n")
-		print(&c.regionblock, " address of c.regionblock \n")
-		print(&c.recvq, " address of c.recvq \n")
-		print(&c.refs, " address of c.refs \n")
+		//buffered channel
+		c = (*hchan)(r.alloc(abi.TypeOf(hchan{})))
 		for i := 0; i < size; i++ {
 			c.refs = append(c.refs, r.alloc(elem))
 		}
-		print(c.refs[0], " first refs \n")
-		print(c.refs[size-1], " last refs \n")
 	}
 	c.elemsize = uint16(elem.Size_)
 	c.elemtype = elem
