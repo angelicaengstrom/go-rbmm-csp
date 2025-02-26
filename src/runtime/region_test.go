@@ -177,8 +177,9 @@ func runSubTestAllocBufferedChannel(t *testing.T, parallel bool) {
 		if n == 0 {
 			n = 1
 		}
+		
 		// Create a channel region.
-		sz := n
+		sz := n + 1
 		ch, reg := CreateRegionChannel[*mediumPointerEven](sz)
 		go func() {
 			region := CreateUserRegion()

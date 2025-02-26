@@ -69,8 +69,12 @@ func AllocFromRegion[T any](r *Region) *T {
 // CreateChannel creates a new chan in the provided region. The chan must not be used after
 // the region is freed. Accessing the value after free may result in a fault,
 // but this fault is also not guaranteed.
-func CreateChannel[T any](size int) T {
-	return runtime_region_createChannel(reflectlite.TypeOf((*T)(nil)), size).(chan T)
+func CreateChannel[T any](size int) (chan T, *Region) {
+	r := CreateRegion()
+	var ch chan T
+	chPtr := (*uintptr)(unsafe.Pointer(&ch))
+	*chPtr = (uintptr)(runtime_region_createChannel(r.r, reflectlite.TypeOf((*T)(nil)), size))
+	return ch, r
 }
 
 //go:linkname reflect_region_allocFromRegion reflect.region_allocFromRegion
@@ -88,4 +92,4 @@ func runtime_region_allocFromRegion(region unsafe.Pointer, typ any) any
 func runtime_region_removeRegion(region unsafe.Pointer)
 
 //go:linkname runtime_region_createChannel
-func runtime_region_createChannel(typ any, size int) any
+func runtime_region_createChannel(region unsafe.Pointer, typ any, size int) unsafe.Pointer

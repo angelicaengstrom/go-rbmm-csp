@@ -39,9 +39,10 @@ func TestNestledRegion(t *testing.T) {
 }
 
 func TestChannelRegion(t *testing.T) {
-	ch := region.CreateChannel[int](0)
+	ch, reg := region.CreateChannel[int](0)
 	go func() {
 		ch <- 1
 	}()
 	fmt.Println(<-ch)
+	reg.RemoveRegion()
 }

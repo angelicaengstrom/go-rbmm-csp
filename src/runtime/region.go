@@ -74,9 +74,8 @@ func region_removeRegion(region unsafe.Pointer) {
 // region_createChannel is a wrapper around (*userRegion).makeChan.
 //
 //go:linkname region_createChannel region.runtime_region_createChannel
-func region_createChannel(typ any, sz int) *hchan {
-	region := createUserRegion()
-	return region.makeChan(abi.TypeOf(typ), sz)
+func region_createChannel(region unsafe.Pointer, typ any, sz int) unsafe.Pointer {
+	return unsafe.Pointer(((*userRegion)(region)).makeChan(abi.TypeOf(typ), sz))
 }
 
 const (
@@ -115,8 +114,6 @@ func init() {
 type userRegion struct {
 	// current is the user region block we're currently allocating into.
 	current *mspan
-
-	curr *mblock
 
 	// fullList is a list of full blocks that have not enough free memory left, and
 	// that we'll free once this region is freed.
