@@ -37,29 +37,29 @@ func TestAllocRegion(t *testing.T) {
 	defer GOMAXPROCS(GOMAXPROCS(2))
 	// Start a subtest so that we can clean up after any parallel tests within.
 	t.Run("Alloc", func(t *testing.T) {
-		/*
-			ss := &smallScalar{5}
-			runSubTestAllocRegion(t, ss, false)
 
-			mse := new(mediumScalarEven)
-			for i := range mse {
-				mse[i] = 121
-			}
-			runSubTestAllocRegionFullList(t, mse, false)
+		ss := &smallScalar{5}
+		runSubTestAllocRegion(t, ss, false)
 
-			mso := new(mediumScalarOdd)
-			for i := range mso {
-				mso[i] = 122
-			}
-			runSubTestUserArenaNew(t, mso, false)
+		mse := new(mediumScalarEven)
+		for i := range mse {
+			mse[i] = 121
+		}
+		runSubTestAllocRegionFullList(t, mse, false)
 
-			runSubTestAllocNestledRegion(t, false)
+		mso := new(mediumScalarOdd)
+		for i := range mso {
+			mso[i] = 122
+		}
+		runSubTestUserArenaNew(t, mso, false)
 
-			runSubTestAllocChannel(t, false)
+		runSubTestAllocNestledRegion(t, false)
 
-			runSubTestAllocBufferedChannel(t, false)
+		runSubTestAllocChannel(t, false)
 
-			runSubTestAllocGoRoutine(t, false)*/
+		runSubTestAllocBufferedChannel(t, false)
+
+		runSubTestAllocGoRoutine(t, false)
 
 		runSubTestAllocLocalFreeList(t, false)
 	})
