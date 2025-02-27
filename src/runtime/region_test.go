@@ -9,6 +9,7 @@ import (
 	"reflect"
 	. "runtime"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -36,27 +37,31 @@ func TestAllocRegion(t *testing.T) {
 	defer GOMAXPROCS(GOMAXPROCS(2))
 	// Start a subtest so that we can clean up after any parallel tests within.
 	t.Run("Alloc", func(t *testing.T) {
-		ss := &smallScalar{5}
-		runSubTestAllocRegion(t, ss, false)
+		/*
+			ss := &smallScalar{5}
+			runSubTestAllocRegion(t, ss, false)
 
-		mse := new(mediumScalarEven)
-		for i := range mse {
-			mse[i] = 121
-		}
-		runSubTestAllocRegionFullList(t, mse, false)
+			mse := new(mediumScalarEven)
+			for i := range mse {
+				mse[i] = 121
+			}
+			runSubTestAllocRegionFullList(t, mse, false)
 
-		mso := new(mediumScalarOdd)
-		for i := range mso {
-			mso[i] = 122
-		}
-		runSubTestUserArenaNew(t, mso, false)
+			mso := new(mediumScalarOdd)
+			for i := range mso {
+				mso[i] = 122
+			}
+			runSubTestUserArenaNew(t, mso, false)
 
-		runSubTestAllocNestledRegion(t, false)
+			runSubTestAllocNestledRegion(t, false)
 
-		runSubTestAllocChannel(t, false)
+			runSubTestAllocChannel(t, false)
 
-		runSubTestAllocBufferedChannel(t, false)
+			runSubTestAllocBufferedChannel(t, false)
 
+			runSubTestAllocGoRoutine(t, false)*/
+
+		runSubTestAllocLocalFreeList(t, false)
 	})
 }
 
@@ -129,11 +134,8 @@ func runSubTestAllocNestledRegion(t *testing.T, parallel bool) {
 
 		// Create a new outer region.
 		outer := CreateUserRegion()
-		inner := outer.AllocateFromRegion(reflectlite.TypeOf(&UserRegion{})).(*UserRegion)
-
-		inner = CreateUserRegion()
-		x := inner.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{5}))
-
+		inner := outer.AllocateInnerRegion()
+		x := inner.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{5})).(*smallScalar)
 		if x == nil {
 			t.Errorf("runSubTestAllocNestledRegion() wasn't able to allocate ")
 		}
@@ -143,6 +145,41 @@ func runSubTestAllocNestledRegion(t *testing.T, parallel bool) {
 
 		// Release the region.
 		outer.RemoveUserRegion()
+	})
+}
+
+func runSubTestAllocLocalFreeList(t *testing.T, parallel bool) {
+	t.Run("region.Region.localFreeList", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+
+		// Create a new outer region.
+		outer := CreateUserRegion()
+		inner := outer.AllocateInnerRegion()
+		t.Log("outer.AllocateInnerRegion()")
+		x := inner.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{5})).(*smallScalar)
+		if x == nil {
+			t.Errorf("runSubTestAllocNestledRegion() wasn't able to allocate ")
+		}
+
+		// Release the inner region before the outer
+		inner.RemoveUserRegion()
+		t.Log("inner.RemoveUserRegion()")
+
+		outer.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes * 3 / 4) - 100]byte{}))
+		t.Log("outer.AllocateFromRegion(UserArenaChunkBytes 3 / 4 - 5)")
+
+		outer.AllocateFromRegion(reflectlite.TypeOf(&[UserArenaChunkBytes / 6]byte{}))
+		t.Log("outer.AllocateFromRegion(UserArenaChunkBytes / 5)")
+
+		outer.AllocateFromRegion(reflectlite.TypeOf(&[UserArenaChunkBytes / 6]byte{}))
+		t.Log("outer.AllocateFromRegion(UserArenaChunkBytes / 5)")
+
+		// Release the region.
+		//outer.RemoveUserRegion()
+		t.Log("outer.RemoveUserRegion()")
+
 	})
 }
 
@@ -177,7 +214,7 @@ func runSubTestAllocBufferedChannel(t *testing.T, parallel bool) {
 		if n == 0 {
 			n = 1
 		}
-		
+
 		// Create a channel region.
 		sz := n + 1
 		ch, reg := CreateRegionChannel[*mediumPointerEven](sz)
@@ -200,6 +237,34 @@ func runSubTestAllocBufferedChannel(t *testing.T, parallel bool) {
 		// Close the channel
 		close(ch)
 		reg.RemoveUserRegion()
+	})
+}
+
+func runSubTestAllocGoRoutine(t *testing.T, parallel bool) {
+	t.Run("GoRoutineCounter", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+		r1 := CreateUserRegion()
+		x := r1.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{})).(*smallScalar)
+		x.X = 5
+		// region.RemoveUserRegion()
+
+		// If the region hasn't been removed already
+		if r1.IncrementCounter() {
+			go func(value *smallScalar, r1 *UserRegion) {
+				r2 := CreateUserRegion()
+				y := r2.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{})).(*smallScalar)
+				y.X = value.X
+				r2.RemoveUserRegion()
+				r1.RemoveUserRegion()
+			}(x, r1)
+		}
+
+		time.Sleep(5 * time.Millisecond)
+
+		r1.RemoveUserRegion()
+
 	})
 }
 

@@ -1788,6 +1788,10 @@ func CreateRegionChannel[T any](size int) (chan T, *UserRegion) {
 	return ch, &UserRegion{region: region}
 }
 
+func (r *UserRegion) AllocateInnerRegion() *UserRegion {
+	return &UserRegion{r.region.allocateInnerRegion()}
+}
+
 func (r *UserRegion) GetSize() uintptr {
 	return r.region.current.elemsize
 }
@@ -1802,6 +1806,10 @@ func (r *UserRegion) GetBase() uintptr {
 
 func (r *UserRegion) GetLimit() uintptr {
 	return r.region.current.userArenaChunkFree.limit.addr()
+}
+
+func (r *UserRegion) IncrementCounter() bool {
+	return r.region.incrementCounter()
 }
 
 var AlignUp = alignUp

@@ -517,6 +517,7 @@ type mspan struct {
 	specials              *special      // linked list of special records sorted by offset.
 	userArenaChunkFree    addrRange     // interval for managing chunk allocation
 	largeType             *_type        // malloc header for large objects.
+	nestled               bool          // whether ot not this span is nestled
 }
 
 func (s *mspan) base() uintptr {
