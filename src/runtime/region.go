@@ -124,7 +124,7 @@ type userRegion struct {
 	refs atomic.Int32
 
 	// localFreeList is a list of blocks that previously has been freed
-	localFreeList *concurrentFreeList
+	localFreeList *concurrentFreeList[*mspan]
 
 	// parent is the outer region this region is created by
 	parent *userRegion
@@ -133,51 +133,74 @@ type userRegion struct {
 	depth uintptr
 }
 
-// TODO: Ensure that the concurrentFreeList is race-free
-type concurrentFreeList struct {
-	head *mspan
-	tail *mspan
+type node[T any] struct {
+	s    T
+	next atomic.Pointer[node[T]]
 }
 
-// TODO: Ensure that the concurrentFreeList is race-free
-func (l *concurrentFreeList) init() {
-	l.head = nil
-	l.tail = nil
+type concurrentFreeList[T any] struct {
+	head atomic.Pointer[node[T]]
+	tail atomic.Pointer[node[T]]
 }
 
-// TODO: Ensure that the concurrentFreeList is race-free
-func (l *concurrentFreeList) enqueue(s *mspan) {
-	s.prev = nil
-	s.next = l.head
-	if l.head == nil {
-		l.tail = s
-	} else {
-		l.head.prev = s
+func (l *concurrentFreeList[T]) init() {
+	l.head.Store(&node[T]{})
+	l.tail.Store(l.head.Load())
+}
+
+func (l *concurrentFreeList[T]) enqueue(elem T) {
+	// New value to be enqueued
+	n := &node[T]{s: elem}
+	for {
+		last := l.tail.Load()    //Reads tail
+		next := last.next.Load() //Finds the node that appears to be last
+		if last == l.tail.Load() {
+			// Verify that node is indeed last, checks whether that node has a successor
+			if next == nil {
+				// If so, appends the new n
+				if last.next.CompareAndSwap(next, n) {
+					// Changes the queues tail field from the prior last n to the current last n
+					l.tail.CompareAndSwap(last, n)
+					// If this fails, the thread can return successfully because the call fails only if some other
+					// thread helps it by advancing tail
+					return
+				}
+			} else { // If the tail node has a successor, the method tries to help other threads
+				// Advances tail to refer directly to the successor before trying again to insert its own node
+				l.tail.CompareAndSwap(last, next)
+			}
+		}
 	}
-	l.head = s
 }
 
-// TODO: Ensure that the concurrentFreeList is race-free
-func (l *concurrentFreeList) dequeue() *mspan {
-	if l.tail == nil {
-		return nil
+func (l *concurrentFreeList[T]) dequeue() T {
+	for {
+		first := l.head.Load()    // Reads head
+		last := l.tail.Load()     // Reads tail
+		next := first.next.Load() // Reads sentinel node
+		if first == l.head.Load() {
+			if first == last {
+				if next == nil {
+					panic("Queue is empty")
+				}
+				// If head equals tail and the next node isn't nil, then the tail is lagging behind
+				// As in the enqueue() method, this attempts to help make tail consistent by swinging it
+				// to the sentinel node's successor
+				l.tail.CompareAndSwap(last, next)
+			} else {
+				// The value is read from the successor of the sentinel node
+				s := next.s
+				// Updates head to remove sentinel
+				if l.head.CompareAndSwap(first, next) {
+					return s
+				}
+			}
+		}
 	}
-	s := l.tail
-	prev := s.prev
-	if prev != nil {
-		prev.next = nil
-		l.tail = prev
-	} else {
-		l.head = nil
-		l.tail = nil
-	}
-	s.prev = nil
-	s.next = nil
-	return s
 }
 
-func (l *concurrentFreeList) isEmpty() bool {
-	return l.tail == nil
+func (l *concurrentFreeList[T]) isEmpty() bool {
+	return l.head.Load() == l.tail.Load()
 }
 
 // createUserRegion creates a new userRegion ready to be used.
@@ -188,7 +211,8 @@ func createUserRegion() *userRegion {
 	SetFinalizer(r, func(r *userRegion) {
 		r.removeRegion()
 	})
-	r.localFreeList = &concurrentFreeList{}
+	r.localFreeList = &concurrentFreeList[*mspan]{}
+	r.localFreeList.init()
 	r.current = newRegionBlock(r)
 	r.refs.Store(1)
 	r.parent = nil
@@ -607,7 +631,8 @@ const (
 func (r *userRegion) allocateInnerRegion() *userRegion {
 	inner := (*userRegion)(r.alloc(abi.TypeOf(userRegion{})))
 	inner.parent = r
-	inner.localFreeList = &concurrentFreeList{}
+	inner.localFreeList = &concurrentFreeList[*mspan]{}
+	inner.localFreeList.init()
 	inner.depth = r.depth + 1
 	inner.refs.Store(1)
 	var b *_type

@@ -89,6 +89,8 @@ func runSubTestAllocRegionFullList[S comparable](t *testing.T, value *S, paralle
 			t.Parallel()
 		}
 
+		_, prevAllocated := ReadMemStatsSlow()
+
 		n := int(UserArenaChunkBytes / unsafe.Sizeof(*value))
 		if n == 0 {
 			n = 1
@@ -98,6 +100,7 @@ func runSubTestAllocRegionFullList[S comparable](t *testing.T, value *S, paralle
 		region := CreateUserRegion()
 		block1 := region.GetBlock() //First region block that we allocate to
 
+		// Allocates more memory than is available in our region block
 		for j := 0; j < n+1; j++ {
 			x := region.AllocateFromRegion(reflectlite.TypeOf((*S)(nil)))
 			s := x.(*S)
@@ -107,20 +110,23 @@ func runSubTestAllocRegionFullList[S comparable](t *testing.T, value *S, paralle
 		// The current region block should now be in another span
 		block2 := region.GetBlock()
 
+		// If the first block and the second block are the same we weren't able to fetch a new block from the heap
 		if block1 == block2 {
 			t.Errorf("runSubTestAllocRegionFullList() wasn't able to allocate a new region block")
 		}
 
+		// Each memory block contains UserArenaChunkBytes amount of memory, if the heap contains memory less than
+		// what was allocated from the start the allocation must have failed
 		_, memStats := ReadMemStatsSlow()
-		if memStats.HeapAlloc < uint64(UserArenaChunkBytes)*2 {
+		if memStats.HeapAlloc < prevAllocated.HeapAlloc {
 			t.Errorf("runSubTestAllocRegionFullList() wasn't able to allocate multiple region-block on the heap")
 		}
-
 		// Release the region.
 		region.RemoveUserRegion()
 
+		// After releasing the memory we should have memory less than what was previously allocated + a single region block
 		_, memStats = ReadMemStatsSlow()
-		if memStats.HeapAlloc > uint64(UserArenaChunkBytes)*2 {
+		if memStats.HeapAlloc >= prevAllocated.HeapAlloc+uint64(UserArenaChunkBytes) {
 			t.Errorf("runSubTestAllocRegionFullList() wasn't able to deallocate multiple region-block on the heap")
 		}
 	})
@@ -134,14 +140,29 @@ func runSubTestAllocNestledRegion(t *testing.T, parallel bool) {
 
 		// Create a new outer region.
 		outer := CreateUserRegion()
+		_, prevAllocated := ReadMemStatsSlow()
 		inner := outer.AllocateInnerRegion()
 		x := inner.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{5})).(*smallScalar)
+		// Should be able to allocate within the inner region
 		if x == nil {
 			t.Errorf("runSubTestAllocNestledRegion() wasn't able to allocate ")
 		}
 
+		// The inner region block shouldn't grow in size as a new region block would do, as it is nestled within
+		// the outer region
+		_, nestledAllocated := ReadMemStatsSlow()
+		if nestledAllocated.HeapAlloc > prevAllocated.HeapAlloc+uint64(UserArenaChunkBytes) {
+			t.Errorf("runSubTestAllocNestledRegion() wasn't able to allocate nestled region-block on the heap")
+		}
+
 		// Release the inner region before the outer
 		inner.RemoveUserRegion()
+
+		// Releasing the inner region should not free any memory to the heap, it should return its pages to its parent
+		_, nestledFreed := ReadMemStatsSlow()
+		if nestledFreed.HeapAlloc == nestledAllocated.HeapAlloc {
+			t.Errorf("runSubTestAllocNestledRegion() wasn't able to free nestled region-block on the heap")
+		}
 		outer.RemoveUserRegion()
 	})
 }
@@ -155,28 +176,32 @@ func runSubTestAllocLocalFreeList(t *testing.T, parallel bool) {
 		// Create a new outer region.
 		outer := CreateUserRegion()
 		inner := outer.AllocateInnerRegion()
-		t.Log("outer.AllocateInnerRegion()")
 		x := inner.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{5})).(*smallScalar)
 		if x == nil {
 			t.Errorf("runSubTestAllocNestledRegion() wasn't able to allocate ")
 		}
 
-		// Release the inner region before the outer
+		// Release the inner region before the outer, should return its memory to the outer local free list
 		inner.RemoveUserRegion()
-		t.Log("inner.RemoveUserRegion()")
+		if outer.IsEmptyLocalFreeList() {
+			t.Errorf("runSubTestAllocLocalFreeList() wasn't able to free memory to local free list")
+		}
 
+		// Fill the region block, which should make it require memory from the local free list next time it allocates
 		outer.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes * 3 / 4) - 100]byte{}))
-		t.Log("outer.AllocateFromRegion(UserArenaChunkBytes 3 / 4 - 5)")
 
+		// Request memory lesser than the memory that is lesser than the block in the local free-list
+		// Should allocate on the page in the local free-list
 		outer.AllocateFromRegion(reflectlite.TypeOf(&[UserArenaChunkBytes / 6]byte{}))
-		t.Log("outer.AllocateFromRegion(UserArenaChunkBytes / 5)")
+		if !outer.IsEmptyLocalFreeList() {
+			t.Errorf("runSubTestAllocLocalFreeList() wasn't able to allocate to local free list")
+		}
 
+		// Request more memory than what's left in the current block, should require memory from the heap
 		outer.AllocateFromRegion(reflectlite.TypeOf(&[UserArenaChunkBytes / 6]byte{}))
-		t.Log("outer.AllocateFromRegion(UserArenaChunkBytes / 5)")
 
-		// Release the region.
-		//outer.RemoveUserRegion()
-		t.Log("outer.RemoveUserRegion()")
+		// Release the outer region.
+		outer.RemoveUserRegion()
 
 	})
 }
@@ -187,17 +212,22 @@ func runSubTestAllocChannel(t *testing.T, parallel bool) {
 			t.Parallel()
 		}
 
-		// Create a channel region.
+		// Create a channel region with a unbuffered channel (size == 0)
 		ch, reg := CreateRegionChannel[int](0)
+
+		// Generate a goroutine that sends value to the channel
 		go func() {
 			ch <- 1
 		}()
 
+		// If the main goroutine can't fetch the value, the region-channel wasn't able to allocate
 		if <-ch != 1 {
 			t.Errorf("CreateRegionChannel() wasn't able to allocate")
 		}
+
 		// Close the channel
 		close(ch)
+		// remove the channel region
 		reg.RemoveUserRegion()
 	})
 }
@@ -246,15 +276,19 @@ func runSubTestAllocGoRoutine(t *testing.T, parallel bool) {
 		r1 := CreateUserRegion()
 		x := r1.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{})).(*smallScalar)
 		x.X = 5
-		// r1.RemoveUserRegion()
 
-		// If the region hasn't been removed already
+		// Increment the counter before a goroutine references the region to prevent freeing of memory that will
+		// later be used
 		if r1.IncrementCounter() {
 			go func(value *smallScalar, r1 *UserRegion) {
+				// Each goroutine should have its own region to allocate their own values
+				// It is not safe to write to a referred memory - without locks
 				r2 := CreateUserRegion()
 				y := r2.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{})).(*smallScalar)
 				y.X = value.X
 				r2.RemoveUserRegion()
+				// Decrement the counter as the reference is no longer needed, will remove the region if main isn't
+				// referring to it anymore
 				r1.DecrementCounter()
 			}(x, r1)
 		}
@@ -273,17 +307,65 @@ func TestDeallocRegion(t *testing.T) {
 	// Start a subtest so that we can clean up after any parallel tests within.
 	t.Run("Dealloc", func(t *testing.T) {
 		region := CreateUserRegion()
+		// Reads memstats before creating the region
 		_, memStatsBefore := ReadMemStatsSlow()
 		region.RemoveUserRegion()
+		// Reads memstats after freeing the reigon
 		_, memStatsAfter := ReadMemStatsSlow()
 
+		// If it is possible to fetch the region block, it wasn't properly freed
 		if region.GetBlock() != nil {
 			t.Errorf("RemoveUserRegion() should have nil region")
 		}
 
-		if memStatsAfter.HeapAlloc > memStatsBefore.HeapAlloc+uint64(UserArenaChunkBytes) {
+		// If the memStatsAfter are larger or equal to memStatsBefore, the memory wasn't properly freed
+		if memStatsAfter.HeapAlloc >= memStatsBefore.HeapAlloc {
 			t.Errorf("RemoveUserRegion() wasn't able to deallocate a region-block on the heap")
 		}
+	})
+}
+
+func TestConcurrentQueue(t *testing.T) {
+	// Start a subtest so that we can clean up after any parallel tests within.
+	t.Run("ConcurrentQueue", func(t *testing.T) {
+		runSubTestEnqueue(t, false)
+		runSubTestDequeue(t, true)
+	})
+}
+
+func runSubTestEnqueue(t *testing.T, parallel bool) {
+	t.Run("Enqueue", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+		queue := &ConcurrentQueue[int]{}
+		queue.Init()
+		queue.Enqueue(1)
+		queue.Enqueue(2)
+	})
+}
+
+func runSubTestDequeue(t *testing.T, parallel bool) {
+	t.Run("Dequeue", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+		queue := &ConcurrentQueue[int]{}
+		queue.Init()
+		queue.Enqueue(1)
+
+		if queue.Dequeue() != 1 {
+			t.Errorf("Dequeue() wasn't able to deallocate")
+		}
+
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("Expected a panic when dequeueing an empty list")
+			}
+		}()
+
+		// Dequeuing when there are no values should result in a panic
+		queue.Dequeue()
 	})
 }
 

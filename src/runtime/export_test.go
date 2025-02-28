@@ -1816,6 +1816,27 @@ func (r *UserRegion) DecrementCounter() {
 	r.region.decrementCounter()
 }
 
+func (r *UserRegion) IsEmptyLocalFreeList() bool {
+	return r.region.localFreeList.isEmpty()
+}
+
+type ConcurrentQueue[T any] struct {
+	cq *concurrentFreeList[T]
+}
+
+func (cq *ConcurrentQueue[T]) Init() {
+	cq.cq = &concurrentFreeList[T]{}
+	cq.cq.init()
+}
+
+func (cq *ConcurrentQueue[T]) Enqueue(elem T) {
+	cq.cq.enqueue(elem)
+}
+
+func (cq *ConcurrentQueue[T]) Dequeue() T {
+	return cq.cq.dequeue()
+}
+
 var AlignUp = alignUp
 
 func BlockUntilEmptyFinalizerQueue(timeout int64) bool {
