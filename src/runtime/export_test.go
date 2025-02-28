@@ -1812,6 +1812,10 @@ func (r *UserRegion) IncrementCounter() bool {
 	return r.region.incrementCounter()
 }
 
+func (r *UserRegion) DecrementCounter() {
+	r.region.decrementCounter()
+}
+
 var AlignUp = alignUp
 
 func BlockUntilEmptyFinalizerQueue(timeout int64) bool {

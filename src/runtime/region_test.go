@@ -142,8 +142,6 @@ func runSubTestAllocNestledRegion(t *testing.T, parallel bool) {
 
 		// Release the inner region before the outer
 		inner.RemoveUserRegion()
-
-		// Release the region.
 		outer.RemoveUserRegion()
 	})
 }
@@ -248,7 +246,7 @@ func runSubTestAllocGoRoutine(t *testing.T, parallel bool) {
 		r1 := CreateUserRegion()
 		x := r1.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{})).(*smallScalar)
 		x.X = 5
-		// region.RemoveUserRegion()
+		// r1.RemoveUserRegion()
 
 		// If the region hasn't been removed already
 		if r1.IncrementCounter() {
@@ -257,7 +255,7 @@ func runSubTestAllocGoRoutine(t *testing.T, parallel bool) {
 				y := r2.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{})).(*smallScalar)
 				y.X = value.X
 				r2.RemoveUserRegion()
-				r1.RemoveUserRegion()
+				r1.DecrementCounter()
 			}(x, r1)
 		}
 
@@ -288,3 +286,5 @@ func TestDeallocRegion(t *testing.T) {
 		}
 	})
 }
+
+//TODO: Test more edge cases, each method implemented to ensure correctness
