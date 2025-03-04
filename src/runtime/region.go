@@ -404,11 +404,6 @@ func (r *userRegion) freeUserRegionBlock(s *mspan, x unsafe.Pointer) {
 		throw("span is not for a region block")
 	}
 
-	// If the span is nestled it means that the memory will be deallocated from its outer span
-	if s.nestled && r.depth == 0 {
-		return
-	}
-
 	// Make ourselves non-preemptible as we manipulate state and statistics.
 	//
 	// Also required by freeUserRegionBlock.
@@ -427,21 +422,26 @@ func (r *userRegion) freeUserRegionBlock(s *mspan, x unsafe.Pointer) {
 		// enqueue the span to the localFreeList
 		r.parent.localFreeList.enqueue(s)
 	} else {
-		// Actually set the region block to fault, so we'll get dangling pointer errors.
-		// sysFault currently uses a method on each OS that forces it to evacuate all
-		// memory backing the chunk.
+		// If the span is nestled it means that the memory will be deallocated from its outer span
+		if !s.nestled {
+			// Actually set the region block to fault, so we'll get dangling pointer errors.
+			// sysFault currently uses a method on each OS that forces it to evacuate all
+			// memory backing the chunk.
 
-		sysFault(unsafe.Pointer(s.base()), s.npages*pageSize)
+			sysFault(unsafe.Pointer(s.base()), s.npages*pageSize)
 
-		setMemStatsAfterFree(s)
+			setMemStatsAfterFree(s)
 
-		mheap_.pagesInUse.Add(-s.npages)
-		s.state.set(mSpanDead)
+			mheap_.pagesInUse.Add(-s.npages)
+			s.state.set(mSpanDead)
 
-		// Add the page to the global free list of the heap
-		systemstack(func() {
-			mheap_.userArena.globalFreeList.enqueue(s)
-		})
+			if s.elemsize >= smallInnerRegionBlockBytes {
+				// Add the page to the global free list of the heap
+				systemstack(func() {
+					mheap_.userArena.globalFreeList.enqueue(s)
+				})
+			}
+		}
 	}
 
 	KeepAlive(x)
@@ -654,8 +654,7 @@ func (r *userRegion) decrementCounter() {
 	if refs == 0 { // No goroutine is accessing the memory
 		r.freeUserRegion()
 	} else if refs < 0 {
-		// If lesser than 0 goroutines references the region, this method must have been called twice
-		print("region double free, ", refs)
+		panic("region double free")
 	}
 	if parent != nil {
 		r.parent.decrementCounter()
@@ -726,17 +725,18 @@ func (r *userRegion) freeUnusedMemory() {
 	nbytes := base - r.current.startAddr // Current amount of bytes used in this block
 	npages := nbytes / pageSize
 
+	// The region block left behind cannot be lesser than a small block
+	if npages*pageSize < smallInnerRegionBlockBytes {
+		npages = smallInnerRegionBlockBytes / pageSize
+	}
+
 	// Round up the number of pages used in this block
-	if nbytes%pageSize != 0 || npages == 0 {
+	if nbytes%pageSize != 0 {
 		npages++
 	}
 
-	if npages == 0 {
-		panic("Number of pages within region cannot be 0")
-	}
-
-	// No point of freeing the unused memory if there is no memory in the block to be freed
-	if npages < regionBlockPages {
+	// No point of freeing the unused memory if the memory to be freed is lesser than a small block
+	if regionBlockBytes-npages*pageSize > smallInnerRegionBlockBytes {
 		r.current.elemsize = npages * pageSize
 
 		// Declare the new limit where this block ends
@@ -770,12 +770,17 @@ func (r *userRegion) generateSpanFromRange(base uintptr, limit uintptr) *mspan {
 	if nbytes%pageSize != 0 {
 		panic("Number of bytes in region aren't divisible by pageSize")
 	}
+	if nbytes < smallInnerRegionBlockBytes {
+		panic("Size of region is too small")
+	}
+
+	npages := nbytes / pageSize
 
 	lock(&mheap_.lock)
 	s := mheap_.allocMSpanLocked()
 	unlock(&mheap_.lock)
 
-	s.init(base, nbytes/pageSize)
+	s.init(base, npages)
 	s.isUserArenaChunk = true
 	s.userArenaChunkFree = rng
 	s.elemsize = nbytes

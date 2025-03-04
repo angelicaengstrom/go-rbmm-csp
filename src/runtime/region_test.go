@@ -171,10 +171,6 @@ func runSubTestAllocLocalFreeList(t *testing.T, parallel bool) {
 		if parallel {
 			t.Parallel()
 		}
-		//Exhaust global free-list
-		for !IsEmptyGlobalFreeList() {
-			CreateUserRegion()
-		}
 
 		// Create a new outer region.
 		outer := CreateUserRegion()
@@ -217,11 +213,6 @@ func runSubTestCantAllocLocalFreeList(t *testing.T, parallel bool) {
 		if parallel {
 			t.Parallel()
 		}
-		//Exhaust global free-list
-		for !IsEmptyGlobalFreeList() {
-			CreateUserRegion()
-		}
-
 		// Create a new outer region.
 		r1 := CreateUserRegion()
 		// Depth 1
@@ -245,6 +236,7 @@ func runSubTestCantAllocLocalFreeList(t *testing.T, parallel bool) {
 		r2.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes / 8)]byte{}))
 		r2.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes / 8)]byte{}))
 
+		// The local free-list should still contain items since the free pages were too small for the allocation
 		if r2.IsEmptyLocalFreeList() {
 			t.Errorf("runSubTestAllocLocalFreeList() wasn't able to allocate to local free list")
 		}
@@ -392,19 +384,19 @@ func runSubTestAllocGlobalFreeList(t *testing.T, parallel bool) {
 		// Create a new region.
 		r1 := CreateUserRegion()
 
-		//Exhaust the global-free list, in case the global-free list already has blocks
+		// Exhaust the global-free list, in case the global-free list got blocks after allocation of r1
 		for !IsEmptyGlobalFreeList() {
 			CreateUserRegion()
 		}
 
 		r1.RemoveUserRegion()
-		// The global free-list should not be empty after removal
+		// The removal of r1 should have added the block to the global free-list
 		if IsEmptyGlobalFreeList() {
 			t.Errorf("runSubTestAllocGlobalFreeList() wasn't able to return to global-free list")
 		}
 
-		// Check if the region is able to be used after freeing the memory
 		r2 := CreateUserRegion()
+		// The global free-list should now be empty as r2 reused the block
 		if !IsEmptyGlobalFreeList() {
 			t.Errorf("runSubTestAllocGlobalFreeList() wasn't able to create region from global-free list")
 		}
