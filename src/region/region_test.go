@@ -27,15 +27,13 @@ func TestSmokeLarge(t *testing.T) {
 
 func TestNestledRegion(t *testing.T) {
 	outer := region.CreateRegion()
-	defer outer.RemoveRegion()
-
 	inner := region.AllocFromRegion[region.Region](outer)
-	inner = region.CreateRegion()
-	defer inner.RemoveRegion()
-
+	
 	for i := 0; i < 10*64; i++ {
 		_ = region.AllocFromRegion[T2](inner)
 	}
+	inner.RemoveRegion()
+	outer.RemoveRegion()
 }
 
 func TestChannelRegion(t *testing.T) {

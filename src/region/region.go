@@ -63,7 +63,13 @@ func (r *Region) RemoveRegion() {
 // the region is freed. Accessing the value after free may result in a fault,
 // but this fault is also not guaranteed.
 func AllocFromRegion[T any](r *Region) *T {
-	return runtime_region_allocFromRegion(r.r, reflectlite.TypeOf((*T)(nil))).(*T)
+	typ := reflectlite.TypeOf((*T)(nil))
+	if typ == reflectlite.TypeOf((*Region)(nil)) {
+		var region any
+		region = &Region{r: runtime_region_allocNestledRegion(r.r)}
+		return (region).(*T)
+	}
+	return runtime_region_allocFromRegion(r.r, typ).(*T)
 }
 
 // CreateChannel creates a new chan in the provided region. The chan must not be used after
@@ -93,3 +99,6 @@ func runtime_region_removeRegion(region unsafe.Pointer)
 
 //go:linkname runtime_region_createChannel
 func runtime_region_createChannel(region unsafe.Pointer, typ any, size int) unsafe.Pointer
+
+//go:linkname runtime_region_allocNestledRegion
+func runtime_region_allocNestledRegion(region unsafe.Pointer) unsafe.Pointer
