@@ -1792,12 +1792,20 @@ func (r *UserRegion) AllocateInnerRegion() *UserRegion {
 	return &UserRegion{r.region.allocateInnerRegion()}
 }
 
+func (r *UserRegion) FreeUnusedMemory() {
+	r.region.freeUnusedMemory()
+}
+
 func (r *UserRegion) GetSize() uintptr {
 	return r.region.current.elemsize
 }
 
 func (r *UserRegion) GetBlock() *mspan {
 	return r.region.current
+}
+
+func (r *UserRegion) GetStartAddr() uintptr {
+	return r.region.current.base()
 }
 
 func (r *UserRegion) GetBase() uintptr {
@@ -1818,6 +1826,10 @@ func (r *UserRegion) DecrementCounter() {
 
 func (r *UserRegion) IsEmptyLocalFreeList() bool {
 	return r.region.localFreeList.isEmpty()
+}
+
+func IsEmptyGlobalFreeList() bool {
+	return mheap_.userArena.globalFreeList.isEmpty()
 }
 
 type ConcurrentQueue[T any] struct {

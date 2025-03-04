@@ -181,7 +181,8 @@ func (l *concurrentFreeList[T]) dequeue() T {
 		if first == l.head.Load() {
 			if first == last {
 				if next == nil {
-					panic("Queue is empty")
+					var empty T
+					return empty
 				}
 				// If head equals tail and the next node isn't nil, then the tail is lagging behind
 				// As in the enqueue() method, this attempts to help make tail consistent by swinging it
@@ -246,47 +247,66 @@ func newRegionBlock(r *userRegion) *mspan {
 func (h *mheap) allocNewRegionBlock() *mspan {
 	var s *mspan
 	var base uintptr
+	var nbytes uintptr
+	var npages uintptr
 
 	//If the global-free list is non-empty, take those first instead of calling sysAlloc
-	//TODO: Check the global free list before calling sysAlloc
-	lock(&h.lock)
-	// Retrieves address from hint, thereafter bumps hint to ptr + regionBlockBytes
-	v, size := h.sysAlloc(regionBlockBytes, &mheap_.userArena.arenaHints, &mheap_.userArenaArenas) // Allocates heap arena space, returns memory region in reserved state
-	if size%regionBlockBytes != 0 {
-		throw("sysAlloc size is not divisible by regionBlockBytes")
+	if !h.userArena.globalFreeList.isEmpty() {
+		s = h.userArena.globalFreeList.dequeue()
+		// Another goroutine may have fetched the value before us
+		if s != nil {
+			base = s.base()
+			npages = s.npages
+			nbytes = npages * pageSize
+		}
 	}
-	if size > regionBlockBytes {
-		// We got more than we asked for. This can happen if
-		// heapArenaSize > regionBlockBytes, or if sysAlloc just returns
-		// some extra as a result of trying to find an aligned region.
-		//TODO: Set these extra pages to the global free list
-		/*
-			for i := regionBlockBytes; i < size; i += regionBlockBytes {
-				s := h.allocMSpanLocked()
-				s.init(uintptr(v)+i, regionBlockPages)
-				s.next = r.localFreeList
-				r.localFreeList = s
-		} */
-		size = regionBlockBytes
-	}
-	base = uintptr(v)
-	if base == 0 {
-		// Out of memory.
+
+	// If there were no value to be found in the global-free list, fetch a span from the heap
+	if s == nil {
+		nbytes = regionBlockBytes
+		npages = regionBlockPages
+
+		lock(&h.lock)
+		// Allocates heap arena space, returns memory region in reserved state
+		v, size := h.sysAlloc(nbytes, &mheap_.userArena.arenaHints, &mheap_.userArenaArenas)
 		unlock(&h.lock)
-		return nil
+		if size%nbytes != 0 {
+			throw("sysAlloc size is not divisible by regionBlockBytes")
+		}
+		if size > nbytes {
+			// We got more than we asked for. This can happen if
+			// heapArenaSize > regionBlockBytes, or if sysAlloc just returns
+			// some extra as a result of trying to find an aligned region.
+
+			for i := nbytes; i < size; i += nbytes {
+				lock(&h.lock)
+				s := h.allocMSpanLocked()
+				unlock(&h.lock)
+				s.init(uintptr(v)+i, npages)
+				h.userArena.globalFreeList.enqueue(s)
+			}
+			size = regionBlockBytes
+		}
+		base = uintptr(v)
+		if base == 0 {
+			// Out of memory.
+			return nil
+		}
+		lock(&h.lock)
+		// Allocates a mspan object, but h.lock must be held
+		s = h.allocMSpanLocked()
+		unlock(&h.lock)
 	}
-	s = h.allocMSpanLocked() // Allocates a mspan object, but h.lock must be held
-	unlock(&h.lock)
 
 	// sysAlloc returns Reserved address space, and any span we're
 	// reusing is set to fault (so, also Reserved), so transition
 	// it to Prepared and then Ready.
-	sysMap(unsafe.Pointer(base), regionBlockBytes, &gcController.heapReleased)
-	sysUsed(unsafe.Pointer(base), regionBlockBytes, regionBlockBytes)
+	sysMap(unsafe.Pointer(base), nbytes, &gcController.heapReleased)
+	sysUsed(unsafe.Pointer(base), nbytes, nbytes)
 
 	// Model the user region as a heap span for a large object.
 	spc := makeSpanClass(0, true)
-	h.initSpan(s, spanAllocHeap, spc, base, regionBlockPages)
+	h.initSpan(s, spanAllocHeap, spc, base, npages)
 	s.isUserArenaChunk = true
 	s.limit = s.base() + s.elemsize
 
@@ -410,12 +430,20 @@ func (r *userRegion) freeUserRegionBlock(s *mspan, x unsafe.Pointer) {
 		// Actually set the region block to fault, so we'll get dangling pointer errors.
 		// sysFault currently uses a method on each OS that forces it to evacuate all
 		// memory backing the chunk.
+
 		sysFault(unsafe.Pointer(s.base()), s.npages*pageSize)
 
-		//TODO: Add the page to the global free list of the heap
-
 		setMemStatsAfterFree(s)
+
+		mheap_.pagesInUse.Add(-s.npages)
+		s.state.set(mSpanDead)
+
+		// Add the page to the global free list of the heap
+		systemstack(func() {
+			mheap_.userArena.globalFreeList.enqueue(s)
+		})
 	}
+
 	KeepAlive(x)
 	releasem(mp)
 }
@@ -463,24 +491,37 @@ func (r *userRegion) alloc(typ *_type) unsafe.Pointer {
 	s := r.current
 	x := s.bump(typ)
 
+	var unusedSpans []*mspan
 	// Try again, a result of the region block being full
 	for x == nil {
 		if s.userArenaChunkFree.size() > regionBlockMaxAllocBytes {
 			throw("wasted too much memory in an region block")
 		}
+		// If the block is unused, don't append it to fullList, return it to the local or global list
+		// after finding a suitable block
+		if s.isUnused() {
+			unusedSpans = append(unusedSpans, s)
+		}
 		// Fetch a new region block, and try to bump again
 		s = newRegionBlock(r)
 		x = s.bump(typ)
 
-		// If the block is unused, free the memory
-		if s.isUnused() {
-			r.freeUserRegionBlock(s, unsafe.Pointer(s.base()))
-		} else {
+		// Append the new block to the fullList
+		if x != nil {
 			s.next = r.fullList
 			r.fullList = s
 		}
 	}
 	r.current = s
+
+	// Place back the spans to the local free-list or free them to the global free-list
+	for _, u := range unusedSpans {
+		if u.nestled {
+			r.localFreeList.enqueue(u)
+		} else {
+			r.freeUserRegionBlock(u, unsafe.Pointer(u.base()))
+		}
+	}
 
 	return x
 }
@@ -497,7 +538,7 @@ func (s *mspan) bump(typ *_type) unsafe.Pointer {
 	if size == 0 {
 		return unsafe.Pointer(&zerobase)
 	}
-	if size > regionBlockBytes {
+	if size > regionBlockMaxAllocBytes {
 		// Redirect allocations that don't fit into a block well directly
 		// from the heap.
 		return newobject(typ)
@@ -528,7 +569,7 @@ func (s *mspan) bump(typ *_type) unsafe.Pointer {
 		return nil
 	}
 	if s.needzero != 0 {
-		throw("arena chunk needs zeroing, but should already be zeroed")
+		throw("region block needs zeroing, but should already be zeroed")
 	}
 
 	mp.mallocing = 0
@@ -558,7 +599,6 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 		panic(plainError("makechan: size out of range"))
 	}
 
-	//TODO: return the rest of the memory to the global free list, memory that we don't use
 	var c *hchan
 	switch {
 	case mem == 0:
@@ -579,6 +619,8 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 	c.regionblock = r //could be removed, usage case was only if we wanted to bump sudog and g
 	lockInit(&c.lock, lockRankHchan)
 
+	// Since the entire buffer is already allocated, it is ok to free here
+	r.freeUnusedMemory()
 	return c
 }
 
@@ -652,28 +694,92 @@ func (r *userRegion) allocateInnerRegion() *userRegion {
 	return inner
 }
 
-// newInnerRegionBlock generates a mspan in the parent region block with a predetermined size
-// this block is used by the inner region to store data
+// newInnerRegionBlock generates a mspan in the parent region block with a predetermined size.
+// This block is used by the inner region to store data
 func (r *userRegion) newInnerRegionBlock(block *_type) *mspan {
 	// Allocates a block to the outer region with a predetermined size
+	startAddr := r.current.startAddr
 	base := r.current.userArenaChunkFree.base.a
 	r.alloc(block)
+	// We may have to update the base address if we had to allocate a new block for the inner region
+	if r.current.startAddr != startAddr {
+		base = r.current.startAddr
+	}
 	limit := r.current.userArenaChunkFree.base.a
-	lock(&mheap_.lock)
-	s := mheap_.allocMSpanLocked()
-	unlock(&mheap_.lock)
 
 	// The range of the inner region is the bounds before and after allocation on the parent
-	rng := makeAddrRange(base, limit)
-	nbytes := rng.size()
-
-	s.init(base, nbytes/pageSize)
-	s.isUserArenaChunk = true
-	s.userArenaChunkFree = rng
-	s.limit = limit
-	s.needzero = 0   // should already have been zeroed by the parent region
+	s := r.generateSpanFromRange(base, limit)
 	s.nestled = true // the span is allocated at a depth > 0, therefore it is nestled
 	return s
 }
 
-// TODO: Create a method that returns the unused memory to the global free list, or local free list if inner region
+// freeUnusedMemory is a method that frees the end of the region block that aren't used. Useful when it is
+// known that the region isn't going to allocate any more memory, making the pages useful for other regions
+//
+// If the region block is nestled, the end of the block is freed to the local free-list, otherwise it is returned
+// to the global free-list.
+func (r *userRegion) freeUnusedMemory() {
+	// Fetch the current base and limit of the region block
+	base := r.current.userArenaChunkFree.base.a
+	limit := r.current.limit
+
+	nbytes := base - r.current.startAddr // Current amount of bytes used in this block
+	npages := nbytes / pageSize
+
+	// Round up the number of pages used in this block
+	if nbytes%pageSize != 0 || npages == 0 {
+		npages++
+	}
+
+	if npages == 0 {
+		panic("Number of pages within region cannot be 0")
+	}
+
+	// No point of freeing the unused memory if there is no memory in the block to be freed
+	if npages < regionBlockPages {
+		r.current.elemsize = npages * pageSize
+
+		// Declare the new limit where this block ends
+		newLimit := r.current.startAddr + r.current.elemsize
+
+		// Set the limit to the base
+		r.current.limit = newLimit
+		r.current.userArenaChunkFree.limit.a = newLimit
+		r.current.npages = npages
+		// Generate a new span out of the unused memory in the region block
+
+		var s *mspan
+		systemstack(func() {
+			s = r.generateSpanFromRange(newLimit, limit)
+		})
+
+		if s != nil {
+			// Free the region block that is unused, either to the local or global free-list
+			r.freeUserRegionBlock(s, unsafe.Pointer(s.base()))
+		}
+	}
+}
+
+// generateSpanFromRange generates a region block between base and limit
+//
+// The range between base and limit has to be divisible by pageSize
+func (r *userRegion) generateSpanFromRange(base uintptr, limit uintptr) *mspan {
+	// Generate a new address range based on base and limit
+	rng := makeAddrRange(base, limit)
+	nbytes := rng.size() // The number of bytes that the range contains
+	if nbytes%pageSize != 0 {
+		panic("Number of bytes in region aren't divisible by pageSize")
+	}
+
+	lock(&mheap_.lock)
+	s := mheap_.allocMSpanLocked()
+	unlock(&mheap_.lock)
+
+	s.init(base, nbytes/pageSize)
+	s.isUserArenaChunk = true
+	s.userArenaChunkFree = rng
+	s.elemsize = nbytes
+	s.limit = limit
+	s.needzero = 0
+	return s
+}

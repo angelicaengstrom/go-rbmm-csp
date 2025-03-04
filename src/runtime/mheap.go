@@ -237,8 +237,8 @@ type mheap struct {
 		// identifying when this is true, and moves the span to the ready list.
 		quarantineList mSpanList
 
-		// readyList is a list of empty user arena spans that are ready for reuse.
-		readyList mSpanList
+		// globalFreeList is a list of empty user arena spans that are ready for reuse.
+		globalFreeList *concurrentFreeList[*mspan]
 	}
 
 	// cleanupID is a counter which is incremented each time a cleanup special is added

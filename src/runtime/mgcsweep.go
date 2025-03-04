@@ -740,7 +740,7 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 			}
 			lock(&mheap_.lock)
 			mheap_.userArena.quarantineList.remove(s)
-			mheap_.userArena.readyList.insert(s)
+			mheap_.userArena.globalFreeList.enqueue(s)
 			unlock(&mheap_.lock)
 		})
 		return false

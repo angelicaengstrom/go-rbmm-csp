@@ -51,17 +51,15 @@ func TestAllocRegion(t *testing.T) {
 		for i := range mso {
 			mso[i] = 122
 		}
+
 		runSubTestUserArenaNew(t, mso, false)
-
 		runSubTestAllocNestledRegion(t, false)
-
 		runSubTestAllocChannel(t, false)
-
 		runSubTestAllocBufferedChannel(t, false)
-
 		runSubTestAllocGoRoutine(t, false)
-
 		runSubTestAllocLocalFreeList(t, false)
+		runSubTestCantAllocLocalFreeList(t, false)
+		runSubTestAllocGlobalFreeList(t, false)
 	})
 }
 
@@ -78,6 +76,7 @@ func runSubTestAllocRegion[S comparable](t *testing.T, value *S, parallel bool) 
 		if x == nil {
 			t.Errorf("AllocateFromRegion() wasn't able to allocate ")
 		}
+
 		// Release the region.
 		region.RemoveUserRegion()
 	})
@@ -172,6 +171,10 @@ func runSubTestAllocLocalFreeList(t *testing.T, parallel bool) {
 		if parallel {
 			t.Parallel()
 		}
+		//Exhaust global free-list
+		for !IsEmptyGlobalFreeList() {
+			CreateUserRegion()
+		}
 
 		// Create a new outer region.
 		outer := CreateUserRegion()
@@ -180,7 +183,6 @@ func runSubTestAllocLocalFreeList(t *testing.T, parallel bool) {
 		if x == nil {
 			t.Errorf("runSubTestAllocNestledRegion() wasn't able to allocate ")
 		}
-
 		// Release the inner region before the outer, should return its memory to the outer local free list
 		inner.RemoveUserRegion()
 		if outer.IsEmptyLocalFreeList() {
@@ -188,11 +190,15 @@ func runSubTestAllocLocalFreeList(t *testing.T, parallel bool) {
 		}
 
 		// Fill the region block, which should make it require memory from the local free list next time it allocates
-		outer.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes * 3 / 4) - 100]byte{}))
+		// OBS: We cannot allocate more than UserArenaChunkBytes / 4 as it will be placed on the heap
+		outer.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes / 4)]byte{}))
+		outer.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes / 4)]byte{}))
+		outer.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes / 4)]byte{}))
 
 		// Request memory lesser than the memory that is lesser than the block in the local free-list
 		// Should allocate on the page in the local free-list
 		outer.AllocateFromRegion(reflectlite.TypeOf(&[UserArenaChunkBytes / 6]byte{}))
+
 		if !outer.IsEmptyLocalFreeList() {
 			t.Errorf("runSubTestAllocLocalFreeList() wasn't able to allocate to local free list")
 		}
@@ -202,6 +208,50 @@ func runSubTestAllocLocalFreeList(t *testing.T, parallel bool) {
 
 		// Release the outer region.
 		outer.RemoveUserRegion()
+
+	})
+}
+
+func runSubTestCantAllocLocalFreeList(t *testing.T, parallel bool) {
+	t.Run("region.Region.localFreeList2", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+		//Exhaust global free-list
+		for !IsEmptyGlobalFreeList() {
+			CreateUserRegion()
+		}
+
+		// Create a new outer region.
+		r1 := CreateUserRegion()
+		// Depth 1
+		r2 := r1.AllocateInnerRegion()
+		// Depth 2
+		r3 := r2.AllocateInnerRegion()
+		r3.RemoveUserRegion() // Place the smaller region to the local free-list
+		r4 := r2.AllocateInnerRegion()
+		r4.RemoveUserRegion() // Place the smaller region to the local free-list
+
+		if r2.IsEmptyLocalFreeList() {
+			t.Errorf("runSubTestCantAllocLocalFreeList() wasn't able to free memory to local free list at depth 1")
+		}
+
+		// Fill the region block, which should make it require memory from the local free list next time it allocates
+		// OBS: We cannot allocate more than UserArenaChunkBytes / 4 as it will be placed on the heap
+		r2.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes / 16)]byte{}))
+
+		// Request memory larger than the memory in the local free-list
+		// Should not allocate from the local free-list
+		r2.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes / 8)]byte{}))
+		r2.AllocateFromRegion(reflectlite.TypeOf(&[(UserArenaChunkBytes / 8)]byte{}))
+
+		if r2.IsEmptyLocalFreeList() {
+			t.Errorf("runSubTestAllocLocalFreeList() wasn't able to allocate to local free list")
+		}
+
+		// Release the outer regions
+		r2.RemoveUserRegion()
+		r1.RemoveUserRegion()
 
 	})
 }
@@ -237,15 +287,22 @@ func runSubTestAllocBufferedChannel(t *testing.T, parallel bool) {
 		if parallel {
 			t.Parallel()
 		}
+		_, preAllocated := ReadMemStatsSlow()
 
 		n := int(UserArenaChunkBytes / unsafe.Sizeof(&mediumPointerEven{}))
 		if n == 0 {
 			n = 1
 		}
 
-		// Create a channel region.
-		sz := n + 1
-		ch, reg := CreateRegionChannel[*mediumPointerEven](sz)
+		// Create a channel region with a buffered channel
+		sz := n + 1                                            // Set the buffered channel to be larger than a region block
+		ch, reg := CreateRegionChannel[*mediumPointerEven](sz) // Initializing a buffered channel should generate two region blocks
+
+		_, bufferedAllocated := ReadMemStatsSlow()
+		// Fails if the amount of heap allocated is lesser then the static size of region block times 2
+		if bufferedAllocated.HeapAlloc < preAllocated.HeapAlloc+uint64(UserArenaChunkBytes)*2 {
+			t.Errorf("runSubTestAllocBufferedChannel() wasn't able to initialize channel")
+		}
 		go func() {
 			region := CreateUserRegion()
 			mse := region.AllocateFromRegion(reflectlite.TypeOf(&mediumPointerEven{})).(*mediumPointerEven)
@@ -258,6 +315,7 @@ func runSubTestAllocBufferedChannel(t *testing.T, parallel bool) {
 			}
 
 		}()
+		// Should be able to fetch the values even if the buffered values are spread out on various region blocks
 		for i := 0; i < sz; i++ {
 			<-ch
 		}
@@ -325,6 +383,42 @@ func TestDeallocRegion(t *testing.T) {
 	})
 }
 
+func runSubTestAllocGlobalFreeList(t *testing.T, parallel bool) {
+	t.Run("region.Region.globalFreeList", func(t *testing.T) {
+		if parallel {
+			t.Parallel()
+		}
+
+		// Create a new region.
+		r1 := CreateUserRegion()
+
+		//Exhaust the global-free list, in case the global-free list already has blocks
+		for !IsEmptyGlobalFreeList() {
+			CreateUserRegion()
+		}
+
+		r1.RemoveUserRegion()
+		// The global free-list should not be empty after removal
+		if IsEmptyGlobalFreeList() {
+			t.Errorf("runSubTestAllocGlobalFreeList() wasn't able to return to global-free list")
+		}
+
+		// Check if the region is able to be used after freeing the memory
+		r2 := CreateUserRegion()
+		if !IsEmptyGlobalFreeList() {
+			t.Errorf("runSubTestAllocGlobalFreeList() wasn't able to create region from global-free list")
+		}
+
+		x := r2.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{}))
+		if x == nil {
+			t.Errorf("runSubTestAllocGlobalFreeList() wasn't able to allocate from reused memory")
+		}
+
+		r2.RemoveUserRegion()
+
+	})
+}
+
 func TestConcurrentQueue(t *testing.T) {
 	// Start a subtest so that we can clean up after any parallel tests within.
 	t.Run("ConcurrentQueue", func(t *testing.T) {
@@ -358,14 +452,10 @@ func runSubTestDequeue(t *testing.T, parallel bool) {
 			t.Errorf("Dequeue() wasn't able to deallocate")
 		}
 
-		defer func() {
-			if r := recover(); r == nil {
-				t.Errorf("Expected a panic when dequeueing an empty list")
-			}
-		}()
-
-		// Dequeuing when there are no values should result in a panic
-		queue.Dequeue()
+		// Dequeuing when there are no values should result in a nil value
+		if queue.Dequeue() != 0 {
+			t.Errorf("Dequeue() wasn't able to deallocate")
+		}
 	})
 }
 
