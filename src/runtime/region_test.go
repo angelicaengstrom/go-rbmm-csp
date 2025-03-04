@@ -339,11 +339,10 @@ func runSubTestAllocGoRoutine(t *testing.T, parallel bool) {
 				r2.RemoveUserRegion()
 				// Decrement the counter as the reference is no longer needed, will remove the region if main isn't
 				// referring to it anymore
+				time.Sleep(5 * time.Millisecond)
 				r1.DecrementCounter()
 			}(x, r1)
 		}
-
-		time.Sleep(5 * time.Millisecond)
 
 		r1.RemoveUserRegion()
 

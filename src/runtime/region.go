@@ -131,6 +131,9 @@ type userRegion struct {
 
 	// depth is the current depth of the inner region, used to allocate a proper inner size
 	depth uintptr
+
+	// g is the goroutine calling on this region, only the calling goroutine is able to allocate and remove region
+	g *g
 }
 
 type node[T any] struct {
@@ -218,6 +221,7 @@ func createUserRegion() *userRegion {
 	r.refs.Store(1)
 	r.parent = nil
 	r.depth = 0
+	r.g = getg()
 	return r
 }
 
@@ -361,11 +365,18 @@ func setMemStatsAfterAlloc(s *mspan) {
 // removeRegion is used by goroutines that no longer needs a reference of the region, ensuring that its content are
 // freed if no goroutine references it anymore
 func (r *userRegion) removeRegion() {
+	if r.g != getg() {
+		panic("Can't deallocate a referenced region")
+	}
 	refs := r.refs.Add(-1)
 	if refs == 0 {
 		r.freeUserRegion()
 	} else if refs < 0 {
-		panic("region double free, ")
+		panic("region double free")
+	} else {
+		// This method will only be called by the calling goroutine, if this is called we can free the unused memory
+		// since the user won't be allocating anything more to the region
+		r.freeUnusedMemory()
 	}
 }
 
@@ -472,6 +483,9 @@ func setMemStatsAfterFree(s *mspan) {
 // allocateFromRegion receives any type and casts it to a type that could be used for alloc
 // returns a pointer to the created variable that has been allocated within the region
 func (r *userRegion) allocateFromRegion(typ any) any {
+	if r.g != getg() {
+		panic("Can't allocate on a referenced region")
+	}
 	t := (*_type)(efaceOf(&typ).data)
 	if t.Kind_&abi.KindMask != abi.Pointer {
 		throw("allocateFromRegion: non-pointer type")
@@ -516,6 +530,7 @@ func (r *userRegion) alloc(typ *_type) unsafe.Pointer {
 
 	// Place back the spans to the local free-list or free them to the global free-list
 	for _, u := range unusedSpans {
+		// If the span is nestled, we want to add it to our own localFreeList, not our parent's localFreeList
 		if u.nestled {
 			r.localFreeList.enqueue(u)
 		} else {
@@ -670,12 +685,16 @@ const (
 // allocateInnerRegion returns a userRegion within the parent region with a predetermined size depending on
 // the depth of the child region
 func (r *userRegion) allocateInnerRegion() *userRegion {
+	if r.g != getg() {
+		panic("Can't allocate on a referenced region")
+	}
 	inner := (*userRegion)(r.alloc(abi.TypeOf(userRegion{})))
 	inner.parent = r
 	inner.localFreeList = &concurrentFreeList[*mspan]{}
 	inner.localFreeList.init()
 	inner.depth = r.depth + 1
 	inner.refs.Store(1)
+	inner.g = r.g
 	var b *_type
 	// Allocate different amount of bytes to the inner region block, depending on it's depth
 	switch inner.depth {
