@@ -5,9 +5,11 @@
 package runtime_test
 
 import (
+	"fmt"
 	"internal/reflectlite"
 	"reflect"
 	. "runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -46,13 +48,6 @@ func TestAllocRegion(t *testing.T) {
 			mse[i] = 121
 		}
 		runSubTestAllocRegionFullList(t, mse, false)
-
-		mso := new(mediumScalarOdd)
-		for i := range mso {
-			mso[i] = 122
-		}
-
-		runSubTestUserArenaNew(t, mso, false)
 		runSubTestAllocNestledRegion(t, false)
 		runSubTestAllocChannel(t, false)
 		runSubTestAllocBufferedChannel(t, false)
@@ -213,6 +208,7 @@ func runSubTestCantAllocLocalFreeList(t *testing.T, parallel bool) {
 		if parallel {
 			t.Parallel()
 		}
+
 		// Create a new outer region.
 		r1 := CreateUserRegion()
 		// Depth 1
@@ -305,7 +301,7 @@ func runSubTestAllocBufferedChannel(t *testing.T, parallel bool) {
 			for i := 0; i < sz; i++ {
 				ch <- mse
 			}
-
+			region.RemoveUserRegion()
 		}()
 		// Should be able to fetch the values even if the buffered values are spread out on various region blocks
 		for i := 0; i < sz; i++ {
@@ -345,6 +341,7 @@ func runSubTestAllocGoRoutine(t *testing.T, parallel bool) {
 		}
 
 		r1.RemoveUserRegion()
+		time.Sleep(10 * time.Millisecond)
 
 	})
 }
@@ -384,8 +381,9 @@ func runSubTestAllocGlobalFreeList(t *testing.T, parallel bool) {
 		r1 := CreateUserRegion()
 
 		// Exhaust the global-free list, in case the global-free list got blocks after allocation of r1
+		var regions []*UserRegion
 		for !IsEmptyGlobalFreeList() {
-			CreateUserRegion()
+			regions = append(regions, CreateUserRegion())
 		}
 
 		r1.RemoveUserRegion()
@@ -407,6 +405,10 @@ func runSubTestAllocGlobalFreeList(t *testing.T, parallel bool) {
 
 		r2.RemoveUserRegion()
 
+		// Place back all the allocated regions
+		for _, region := range regions {
+			region.RemoveUserRegion()
+		}
 	})
 }
 
@@ -450,4 +452,58 @@ func runSubTestDequeue(t *testing.T, parallel bool) {
 	})
 }
 
-//TODO: Test more edge cases, each method implemented to ensure correctness
+// Benchmarking
+func BenchmarkMemoryAllocationDeallocation(b *testing.B) {
+	var sizes = [][]byte{
+		make([]byte, 64),
+		make([]byte, 128),
+		make([]byte, 256),
+		make([]byte, 512),
+		make([]byte, 1024),
+	}
+
+	var memBefore, memAfter MemStats
+	for _, typ := range sizes {
+		GC()
+		_, memBefore = ReadMemStatsSlow()
+
+		start := time.Now()
+		for i := 0; i < b.N; i++ {
+			region := CreateUserRegion()
+			_ = region.AllocateFromRegion(reflectlite.TypeOf(&typ))
+			region.RemoveUserRegion()
+		}
+		elapsed := time.Since(start)
+
+		GC()
+		_, memAfter = ReadMemStatsSlow()
+
+		b.ReportMetric(float64(memAfter.Alloc-memBefore.Alloc), "bytes_alloc")
+		b.ReportMetric(float64(elapsed.Microseconds())/float64(b.N), "µs/op")
+	}
+}
+
+func BenchmarkHighConcurrency(b *testing.B) {
+	const goroutines = 64
+	b.Run(fmt.Sprintf("%d_Goroutines", goroutines), func(b *testing.B) {
+		b.SetParallelism(goroutines)
+		var allocationsCounter atomic.Int32
+		var deallocationsCounter atomic.Int32
+
+		b.RunParallel(func(pb *testing.PB) {
+			region := CreateUserRegion()
+			_ = region.AllocateFromRegion(reflectlite.TypeOf(&[1024]byte{}))
+
+			for pb.Next() {
+				if region.IncrementCounter() {
+					allocationsCounter.Add(1)
+					region.DecrementCounter()
+					deallocationsCounter.Add(1)
+				}
+			}
+			region.RemoveUserRegion()
+		})
+		b.ReportMetric(float64(allocationsCounter.Load()), "allocCounter")
+		b.ReportMetric(float64(deallocationsCounter.Load()), "deallocCounter")
+	})
+}

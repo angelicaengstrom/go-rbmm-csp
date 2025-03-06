@@ -45,7 +45,6 @@ type hchan struct {
 	recvq         waitq  // list of recv waiters
 	sendq         waitq  // list of send waiters
 	isregionblock bool
-	regionblock   *userRegion
 	refs          []unsafe.Pointer // need refs if it is region block
 
 	// lock protects all fields in hchan, as well as several

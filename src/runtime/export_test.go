@@ -1768,6 +1768,10 @@ type UserRegion struct {
 	region *userRegion
 }
 
+func (r *UserRegion) GetRegion() *userRegion {
+	return r.region
+}
+
 func CreateUserRegion() *UserRegion {
 	return &UserRegion{createUserRegion()}
 }
