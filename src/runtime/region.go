@@ -85,6 +85,16 @@ func region_allocNestledRegion(region unsafe.Pointer) unsafe.Pointer {
 	return unsafe.Pointer((*userRegion)(region).allocateInnerRegion())
 }
 
+//go:linkname region_incRefCounter region.runtime_region_incRefCounter
+func region_incRefCounter(region unsafe.Pointer) bool {
+	return (*userRegion)(region).incrementCounter()
+}
+
+//go:linkname region_decRefCounter region.runtime_region_decRefCounter
+func region_decRefCounter(region unsafe.Pointer) {
+	(*userRegion)(region).decrementCounter()
+}
+
 const (
 	// regionBlockBytes is the size of a user region block.
 	regionBlockBytesMax = 8 << 20
@@ -257,15 +267,12 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 
 	//If the global-free list is non-empty, take those first instead of calling sysAlloc
 	if !h.userArena.globalFreeList.isEmpty() {
-		print("Fetching block from globalFreeList...\n")
 		s = h.userArena.globalFreeList.dequeue()
 		// Another goroutine may have fetched the value before us
 		if s != nil {
 			base = s.base()
 			npages = s.npages
 			nbytes = npages * pageSize
-			print(unsafe.Pointer(s.base()), " startAddr \n")
-			print(unsafe.Pointer(s.base()+nbytes), " limit \n")
 		}
 	}
 
@@ -291,9 +298,6 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 				s := h.allocMSpanLocked()
 				unlock(&h.lock)
 				s.init(uintptr(v)+i, npages)
-				print("Placing block to globalFreeList...\n")
-				print(unsafe.Pointer(s.startAddr), " startAddr \n")
-				print(unsafe.Pointer(s.startAddr+regionBlockBytes), " limit \n")
 				h.userArena.globalFreeList.enqueue(s)
 			}
 			size = regionBlockBytes
@@ -449,9 +453,6 @@ func (r *userRegion) freeUserRegionBlock(s *mspan, x unsafe.Pointer) {
 
 			mheap_.pagesInUse.Add(-s.npages)
 			s.state.set(mSpanDead)
-			print("Placing block to globalFreeList...\n")
-			print(unsafe.Pointer(s.startAddr), " startAddr \n")
-			print(unsafe.Pointer(s.limit), " limit \n")
 			// Add the page to the global free list of the heap
 			systemstack(func() {
 				mheap_.userArena.globalFreeList.enqueue(s)
@@ -756,7 +757,7 @@ func (r *userRegion) freeUnusedMemory() {
 	}
 
 	// No point of freeing the unused memory if the memory to be freed is lesser than a small block
-	if regionBlockBytes-npages*pageSize > largeInnerRegionBlockBytes {
+	if r.current.elemsize-npages*pageSize > largeInnerRegionBlockBytes {
 		r.current.elemsize = npages * pageSize
 
 		// Declare the new limit where this block ends

@@ -83,6 +83,14 @@ func CreateChannel[T any](size int) (chan T, *Region) {
 	return ch, r
 }
 
+func (r *Region) IncRefCounter() bool {
+	return runtime_region_incRefCounter(r.r)
+}
+
+func (r *Region) DecRefCounter() {
+	runtime_region_decRefCounter(r.r)
+}
+
 //go:linkname reflect_region_allocFromRegion reflect.region_allocFromRegion
 func reflect_region_allocFromRegion(r *Region, typ any) any {
 	return runtime_region_allocFromRegion(r.r, typ)
@@ -102,3 +110,9 @@ func runtime_region_createChannel(region unsafe.Pointer, typ any, size int) unsa
 
 //go:linkname runtime_region_allocNestledRegion
 func runtime_region_allocNestledRegion(region unsafe.Pointer) unsafe.Pointer
+
+//go:linkname runtime_region_incRefCounter
+func runtime_region_incRefCounter(region unsafe.Pointer) bool
+
+//go:linkname runtime_region_decRefCounter
+func runtime_region_decRefCounter(region unsafe.Pointer)
