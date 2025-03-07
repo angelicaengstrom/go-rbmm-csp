@@ -84,6 +84,8 @@ type MemStats struct {
 	// The number of live objects is Mallocs - Frees.
 	Mallocs uint64
 
+	HeapLargeInUse uint64
+
 	// Frees is the cumulative count of heap objects freed.
 	Frees uint64
 
@@ -107,6 +109,24 @@ type MemStats struct {
 	// are not considered part of the heap. A span can change
 	// between heap and stack memory; it is never used for both
 	// simultaneously.
+
+	RegionAlloc uint64
+
+	RegionDealloc uint64
+
+	RegionReuse uint64
+
+	RegionCreated uint64
+
+	RegionIntFrag uint64
+
+	RegionInUse uint64
+
+	HeapIntFrag uint64
+
+	HeapSpanCreated uint64
+
+	HeapSpanUsed uint64
 
 	// HeapAlloc is bytes of allocated heap objects.
 	//
@@ -510,6 +530,19 @@ func readmemstats_m(stats *MemStats) {
 	stats.Frees = nFree
 	stats.HeapAlloc = totalAlloc - totalFree
 	stats.HeapSys = gcController.heapInUse.load() + gcController.heapFree.load() + gcController.heapReleased.load()
+
+	stats.RegionAlloc = consStats.regionAlloc
+	stats.RegionDealloc = consStats.regionDealloc
+	stats.RegionReuse = consStats.regionReuse
+	stats.RegionCreated = consStats.regionCreated
+	stats.RegionIntFrag = consStats.regionIntFrag
+	stats.RegionInUse = consStats.regionAlloc - consStats.regionDealloc
+
+	stats.HeapIntFrag = consStats.heapIntFrag
+	stats.HeapLargeInUse = consStats.largeAlloc - consStats.largeFree
+	stats.HeapSpanCreated = consStats.heapSpanCreated
+	stats.HeapSpanUsed = consStats.heapSpanUsed
+
 	// By definition, HeapIdle is memory that was mapped
 	// for the heap but is not currently used to hold heap
 	// objects. It also specifically is memory that can be
@@ -686,6 +719,15 @@ type heapStatsDelta struct {
 	largeFreeCount  uint64                  // number of frees for large objects (>maxSmallSize)
 	smallFreeCount  [_NumSizeClasses]uint64 // number of frees for small objects (<=maxSmallSize)
 
+	regionAlloc     uint64 // bytes allocated for region
+	regionDealloc   uint64 // bytes deallocated from region
+	regionReuse     uint64 // number of region reuse
+	regionCreated   uint64
+	regionIntFrag   uint64
+	heapIntFrag     uint64
+	heapSpanCreated uint64
+	heapSpanUsed    uint64
+
 	// NOTE: This struct must be a multiple of 8 bytes in size because it
 	// is stored in an array. If it's not, atomic accesses to the above
 	// fields may be unaligned and fail on 32-bit platforms.
@@ -711,6 +753,14 @@ func (a *heapStatsDelta) merge(b *heapStatsDelta) {
 	for i := range b.smallFreeCount {
 		a.smallFreeCount[i] += b.smallFreeCount[i]
 	}
+	a.regionAlloc += b.regionAlloc
+	a.regionDealloc += b.regionDealloc
+	a.regionReuse += b.regionReuse
+	a.regionCreated += b.regionCreated
+	a.regionIntFrag += b.regionIntFrag
+	a.heapIntFrag += b.heapIntFrag
+	a.heapSpanCreated += b.heapSpanCreated
+	a.heapSpanUsed += b.heapSpanUsed
 }
 
 // consistentHeapStats represents a set of various memory statistics

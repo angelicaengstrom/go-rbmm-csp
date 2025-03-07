@@ -628,6 +628,7 @@ func mallocinit() {
 	}
 	mheap_.userArena.globalFreeList = &concurrentFreeList[*mspan]{}
 	mheap_.userArena.globalFreeList.init()
+
 	// Initialize the memory limit here because the allocator is going to look at it
 	// but we haven't called gcinit yet and we're definitely going to allocate memory before then.
 	gcController.memoryLimit.Store(maxInt64)
@@ -1169,6 +1170,7 @@ func mallocgcTiny(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uint
 	// Allocate a new maxTinySize block.
 	checkGCTrigger := false
 	span := c.alloc[tinySpanClass]
+
 	v := nextFreeFast(span)
 	if v == 0 {
 		v, span, checkGCTrigger = c.nextFree(tinySpanClass)
@@ -1251,6 +1253,7 @@ func mallocgcTiny(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uint
 }
 
 func mallocgcSmallNoscan(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uintptr) {
+	firstSize := size
 	// Set mp.mallocing to keep from being preempted by GC.
 	mp := acquirem()
 	if doubleCheckMalloc {
@@ -1277,6 +1280,10 @@ func mallocgcSmallNoscan(size uintptr, typ *_type, needzero bool) (unsafe.Pointe
 	size = uintptr(class_to_size[sizeclass])
 	spc := makeSpanClass(sizeclass, true)
 	span := c.alloc[spc]
+	span.intFrag = uint64(size) - uint64(firstSize)
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.heapIntFrag, int64(size-firstSize))
+	memstats.heapStats.release()
 	v := nextFreeFast(span)
 	if v == 0 {
 		v, span, checkGCTrigger = c.nextFree(spc)
@@ -1333,10 +1340,12 @@ func mallocgcSmallNoscan(size uintptr, typ *_type, needzero bool) (unsafe.Pointe
 			gcStart(t)
 		}
 	}
+
 	return x, size
 }
 
 func mallocgcSmallScanNoHeader(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uintptr) {
+	firstSize := size
 	// Set mp.mallocing to keep from being preempted by GC.
 	mp := acquirem()
 	if doubleCheckMalloc {
@@ -1360,6 +1369,7 @@ func mallocgcSmallScanNoHeader(size uintptr, typ *_type, needzero bool) (unsafe.
 	sizeclass := size_to_class8[divRoundUp(size, smallSizeDiv)]
 	spc := makeSpanClass(sizeclass, false)
 	span := c.alloc[spc]
+
 	v := nextFreeFast(span)
 	if v == 0 {
 		v, span, checkGCTrigger = c.nextFree(spc)
@@ -1376,6 +1386,11 @@ func mallocgcSmallScanNoHeader(size uintptr, typ *_type, needzero bool) (unsafe.
 		c.scanAlloc += heapSetTypeNoHeader(uintptr(x), size, typ, span)
 	}
 	size = uintptr(class_to_size[sizeclass])
+
+	span.intFrag = uint64(size) - uint64(firstSize)
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.heapIntFrag, int64(size-firstSize))
+	memstats.heapStats.release()
 
 	// Ensure that the stores above that initialize x to
 	// type-safe memory and set the heap bits occur before
@@ -1428,6 +1443,7 @@ func mallocgcSmallScanNoHeader(size uintptr, typ *_type, needzero bool) (unsafe.
 }
 
 func mallocgcSmallScanHeader(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uintptr) {
+	firstSize := size
 	// Set mp.mallocing to keep from being preempted by GC.
 	mp := acquirem()
 	if doubleCheckMalloc {
@@ -1458,6 +1474,12 @@ func mallocgcSmallScanHeader(size uintptr, typ *_type, needzero bool) (unsafe.Po
 	size = uintptr(class_to_size[sizeclass])
 	spc := makeSpanClass(sizeclass, false)
 	span := c.alloc[spc]
+
+	span.intFrag = uint64(size) - uint64(firstSize)
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.heapIntFrag, int64(size-firstSize))
+	memstats.heapStats.release()
+
 	v := nextFreeFast(span)
 	if v == 0 {
 		v, span, checkGCTrigger = c.nextFree(spc)
@@ -1521,6 +1543,7 @@ func mallocgcSmallScanHeader(size uintptr, typ *_type, needzero bool) (unsafe.Po
 }
 
 func mallocgcLarge(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uintptr) {
+	firstSize := size
 	// Set mp.mallocing to keep from being preempted by GC.
 	mp := acquirem()
 	if doubleCheckMalloc {
@@ -1537,10 +1560,17 @@ func mallocgcLarge(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uin
 	// For large allocations, keep track of zeroed state so that
 	// bulk zeroing can be happen later in a preemptible context.
 	span := c.allocLarge(size, typ == nil || !typ.Pointers())
+
 	span.freeindex = 1
 	span.allocCount = 1
 	span.largeType = nil // Tell the GC not to look at this yet.
 	size = span.elemsize
+
+	span.intFrag = uint64(size) - uint64(firstSize)
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.heapIntFrag, int64(size-firstSize))
+	memstats.heapStats.release()
+
 	x := unsafe.Pointer(span.base())
 
 	// Ensure that the stores above that initialize x to

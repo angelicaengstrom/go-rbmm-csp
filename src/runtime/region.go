@@ -264,6 +264,7 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 	var base uintptr
 	var nbytes uintptr
 	var npages uintptr
+	created := 0
 
 	//If the global-free list is non-empty, take those first instead of calling sysAlloc
 	if !h.userArena.globalFreeList.isEmpty() {
@@ -284,6 +285,7 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 		lock(&h.lock)
 		// Allocates heap arena space, returns memory region in reserved state
 		v, size := h.sysAlloc(nbytes, &mheap_.userArena.arenaHints, &mheap_.userArenaArenas)
+		created++
 		unlock(&h.lock)
 		if size%nbytes != 0 {
 			throw("sysAlloc size is not divisible by regionBlockBytes")
@@ -298,6 +300,7 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 				s := h.allocMSpanLocked()
 				unlock(&h.lock)
 				s.init(uintptr(v)+i, npages)
+				created++
 				h.userArena.globalFreeList.enqueue(s)
 			}
 			size = regionBlockBytes
@@ -325,7 +328,7 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 	s.isUserArenaChunk = true
 	s.limit = s.base() + s.elemsize
 
-	setMemStatsAfterAlloc(s)
+	setMemStatsAfterAlloc(s, created)
 
 	// Clear the span preemptively. It's an region block, so let's assume
 	// everything is going to be used.
@@ -337,6 +340,8 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 	// clear even if it's freshly mapped and we know there's no point
 	// to zeroing as *that* is the critical signal to use huge pages.
 	memclrNoHeapPointers(unsafe.Pointer(s.base()), s.elemsize)
+	// has huge latency, necessary?
+
 	s.needzero = 0
 
 	s.freeIndexForScan = 1
@@ -352,7 +357,7 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 }
 
 // setMemStatsAfterAlloc updates the memstats with the new region block that has been allocated on the heap
-func setMemStatsAfterAlloc(s *mspan) {
+func setMemStatsAfterAlloc(s *mspan, created int) {
 	// Account for this new arena chunk memory.
 	gcController.heapInUse.add(int64(s.npages * pageSize))
 	gcController.heapReleased.add(-int64(s.npages * pageSize))
@@ -364,6 +369,10 @@ func setMemStatsAfterAlloc(s *mspan) {
 	// Model the arena as a single large malloc.
 	atomic.Xadd64(&stats.largeAlloc, int64(s.elemsize))
 	atomic.Xadd64(&stats.largeAllocCount, 1)
+	atomic.Xadd64(&stats.regionAlloc, int64(s.elemsize))
+	atomic.Xadd64(&stats.regionCreated, int64(created))
+	atomic.Xadd64(&stats.regionReuse, 1)
+	atomic.Xadd64(&stats.regionIntFrag, int64(s.elemsize))
 	memstats.heapStats.release()
 
 	// Count the alloc in inconsistent, internal stats.
@@ -457,6 +466,11 @@ func (r *userRegion) freeUserRegionBlock(s *mspan, x unsafe.Pointer) {
 			systemstack(func() {
 				mheap_.userArena.globalFreeList.enqueue(s)
 			})
+		} else {
+			// Free the nestled mspan
+			lock(&mheap_.lock)
+			mheap_.freeMSpanLocked(s)
+			unlock(&mheap_.lock)
 		}
 	}
 
@@ -482,6 +496,9 @@ func setMemStatsAfterFree(s *mspan) {
 	atomic.Xaddint64(&stats.inHeap, -int64(s.npages*pageSize))
 	atomic.Xadd64(&stats.largeFreeCount, 1)
 	atomic.Xadd64(&stats.largeFree, int64(s.elemsize))
+	atomic.Xadd64(&stats.regionDealloc, int64(s.elemsize))
+
+	atomic.Xadd64(&stats.regionIntFrag, -int64(s.limit-s.userArenaChunkFree.base.a))
 	memstats.heapStats.release()
 }
 
@@ -578,6 +595,11 @@ func (s *mspan) bump(typ *_type) unsafe.Pointer {
 	v, ok := s.userArenaChunkFree.takeFromFront(size, typ.Align_)
 	if ok {
 		ptr = unsafe.Pointer(v)
+		// Update the internal fragmentation of the region block
+		stats := memstats.heapStats.acquire()
+		// TODO: Make IntFrag work properly, for both heapAlloc and regionAlloc
+		atomic.Xadd64(&stats.regionIntFrag, -int64(v-s.startAddr))
+		memstats.heapStats.release()
 	}
 	if ptr == nil {
 		// Failed to allocate.
@@ -746,9 +768,9 @@ func (r *userRegion) freeUnusedMemory() {
 	nbytes := base - r.current.startAddr // Current amount of bytes used in this block
 	npages := nbytes / pageSize
 
-	// The region block left behind cannot be lesser than a small block
-	if npages*pageSize < largeInnerRegionBlockBytes {
-		npages = largeInnerRegionBlockBytes / pageSize
+	// The region block left cannot be lesser size than a small block
+	if npages*pageSize < smallInnerRegionBlockBytes {
+		npages = smallInnerRegionBlockBytes / pageSize
 	}
 
 	// Round up the number of pages used in this block
@@ -757,7 +779,7 @@ func (r *userRegion) freeUnusedMemory() {
 	}
 
 	// No point of freeing the unused memory if the memory to be freed is lesser than a small block
-	if r.current.elemsize-npages*pageSize > largeInnerRegionBlockBytes {
+	if r.current.elemsize-npages*pageSize > smallInnerRegionBlockBytes {
 		r.current.elemsize = npages * pageSize
 
 		// Declare the new limit where this block ends

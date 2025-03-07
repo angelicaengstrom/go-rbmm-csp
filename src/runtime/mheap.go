@@ -220,7 +220,6 @@ type mheap struct {
 	specialWeakHandleAlloc fixalloc // allocator for specialWeakHandle
 	speciallock            mutex    // lock for special record allocators.
 	arenaHintAlloc         fixalloc // allocator for arenaHints
-	blockalloc             fixalloc
 
 	// User arena state.
 	//
@@ -409,20 +408,6 @@ type mSpanList struct {
 	last  *mspan // last span in list, or nil if none
 }
 
-type mblock struct {
-	_    sys.NotInHeap
-	next *mblock // next span in list, or nil if none
-	prev *mblock // previous span in list, or nil if none
-
-	startAddr uintptr // address of first byte of span aka s.base()
-	npages    uintptr // number of pages in span
-
-	userRegionBlockFree addrRange // interval for managing chunk allocation
-	elemsize            uintptr   // computed from sizeclass or from npages
-	limit               uintptr   // end of data in span
-	needzero            uint8     // needs to be zeroed before allocation
-}
-
 type mspan struct {
 	_    sys.NotInHeap
 	next *mspan     // next span in list, or nil if none
@@ -518,6 +503,7 @@ type mspan struct {
 	userArenaChunkFree    addrRange     // interval for managing chunk allocation
 	largeType             *_type        // malloc header for large objects.
 	nestled               bool          // whether ot not this span is nestled
+	intFrag               uint64        // inner fragmentation of span
 }
 
 func (s *mspan) base() uintptr {
@@ -781,7 +767,6 @@ func (h *mheap) init() {
 	h.specialPinCounterAlloc.init(unsafe.Sizeof(specialPinCounter{}), nil, nil, &memstats.other_sys)
 	h.specialWeakHandleAlloc.init(unsafe.Sizeof(specialWeakHandle{}), nil, nil, &memstats.gcMiscSys)
 	h.arenaHintAlloc.init(unsafe.Sizeof(arenaHint{}), nil, nil, &memstats.other_sys)
-	h.blockalloc.init(unsafe.Sizeof(mblock{}), nil, nil, &memstats.other_sys)
 
 	// Don't zero mspan allocations. Background sweeping can
 	// inspect a span concurrently with allocating it, so it's
@@ -1123,6 +1108,9 @@ func (h *mheap) tryAllocMSpan() *mspan {
 	// Pull off the last entry in the cache.
 	s := pp.mspancache.buf[pp.mspancache.len-1]
 	pp.mspancache.len--
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.heapSpanUsed, 1)
+	memstats.heapStats.release()
 	return s
 }
 
@@ -1142,16 +1130,28 @@ func (h *mheap) allocMSpanLocked() *mspan {
 	pp := getg().m.p.ptr()
 	if pp == nil {
 		// We don't have a p so just do the normal thing.
+		stats := memstats.heapStats.acquire()
+		atomic.Xadd64(&stats.heapSpanCreated, 1)
+		memstats.heapStats.release()
+
 		return (*mspan)(h.spanalloc.alloc())
 	}
+	created := 0
 	// Refill the cache if necessary.
 	if pp.mspancache.len == 0 {
 		const refillCount = len(pp.mspancache.buf) / 2
 		for i := 0; i < refillCount; i++ {
 			pp.mspancache.buf[i] = (*mspan)(h.spanalloc.alloc())
+			created++
 		}
 		pp.mspancache.len = refillCount
 	}
+
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.heapSpanCreated, int64(created))
+	atomic.Xadd64(&stats.heapSpanUsed, 1)
+	memstats.heapStats.release()
+
 	// Pull off the last entry in the cache.
 	s := pp.mspancache.buf[pp.mspancache.len-1]
 	pp.mspancache.len--
@@ -1677,9 +1677,11 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
 	}
 	// Update consistent stats.
 	stats := memstats.heapStats.acquire()
+
 	switch typ {
 	case spanAllocHeap:
 		atomic.Xaddint64(&stats.inHeap, -int64(nbytes))
+		atomic.Xadd64(&stats.heapIntFrag, -int64(s.intFrag))
 	case spanAllocStack:
 		atomic.Xaddint64(&stats.inStacks, -int64(nbytes))
 	case spanAllocPtrScalarBits:
