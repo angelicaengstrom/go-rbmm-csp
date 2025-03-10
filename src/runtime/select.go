@@ -458,7 +458,12 @@ bufrecv:
 		asanwrite(cas.elem, c.elemtype.Size_)
 	}
 	recvOK = true
-	qp = chanbuf(c, c.recvx)
+	if c.isregionblock {
+		qp = chanregionbuf(c, c.recvx)
+	} else {
+		qp = chanbuf(c, c.recvx)
+	}
+
 	if cas.elem != nil {
 		typedmemmove(c.elemtype, cas.elem, qp)
 	}

@@ -236,8 +236,8 @@ type mheap struct {
 		// identifying when this is true, and moves the span to the ready list.
 		quarantineList mSpanList
 
-		// readyList is a list of empty user arena spans that are ready for reuse.
-		readyList mSpanList
+		// globalFreeList is a list of empty user arena spans that are ready for reuse.
+		globalFreeList *concurrentFreeList[*mspan]
 	}
 
 	// cleanupID is a counter which is incremented each time a cleanup special is added
@@ -502,6 +502,8 @@ type mspan struct {
 	specials              *special      // linked list of special records sorted by offset.
 	userArenaChunkFree    addrRange     // interval for managing chunk allocation
 	largeType             *_type        // malloc header for large objects.
+	nestled               bool          // whether ot not this span is nestled
+	intFrag               uint64        // inner fragmentation of span
 }
 
 func (s *mspan) base() uintptr {
@@ -1106,6 +1108,9 @@ func (h *mheap) tryAllocMSpan() *mspan {
 	// Pull off the last entry in the cache.
 	s := pp.mspancache.buf[pp.mspancache.len-1]
 	pp.mspancache.len--
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.heapSpanUsed, 1)
+	memstats.heapStats.release()
 	return s
 }
 
@@ -1125,19 +1130,32 @@ func (h *mheap) allocMSpanLocked() *mspan {
 	pp := getg().m.p.ptr()
 	if pp == nil {
 		// We don't have a p so just do the normal thing.
+		stats := memstats.heapStats.acquire()
+		atomic.Xadd64(&stats.heapSpanCreated, 1)
+		memstats.heapStats.release()
+
 		return (*mspan)(h.spanalloc.alloc())
 	}
+	created := 0
 	// Refill the cache if necessary.
 	if pp.mspancache.len == 0 {
 		const refillCount = len(pp.mspancache.buf) / 2
 		for i := 0; i < refillCount; i++ {
 			pp.mspancache.buf[i] = (*mspan)(h.spanalloc.alloc())
+			created++
 		}
 		pp.mspancache.len = refillCount
 	}
+
 	// Pull off the last entry in the cache.
 	s := pp.mspancache.buf[pp.mspancache.len-1]
 	pp.mspancache.len--
+
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.heapSpanCreated, int64(created))
+	atomic.Xadd64(&stats.heapSpanUsed, 1)
+	memstats.heapStats.release()
+
 	return s
 }
 
@@ -1660,6 +1678,7 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
 	}
 	// Update consistent stats.
 	stats := memstats.heapStats.acquire()
+
 	switch typ {
 	case spanAllocHeap:
 		atomic.Xaddint64(&stats.inHeap, -int64(nbytes))

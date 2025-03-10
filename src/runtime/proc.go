@@ -5014,6 +5014,7 @@ func malg(stacksize int32) *g {
 // Create a new g running fn.
 // Put it on the queue of g's waiting to run.
 // The compiler turns a go statement into a call to this.
+// TODO: Make the new goroutine region-based
 func newproc(fn *funcval) {
 	gp := getg()
 	pc := sys.GetCallerPC()

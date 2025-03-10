@@ -995,9 +995,8 @@ func (h *mheap) allocUserArenaChunk() *mspan {
 
 	// First check the free list.
 	lock(&h.lock)
-	if !h.userArena.readyList.isEmpty() {
-		s = h.userArena.readyList.first
-		h.userArena.readyList.remove(s)
+	if !h.userArena.globalFreeList.isEmpty() {
+		s = h.userArena.globalFreeList.dequeue()
 		base = s.base()
 	} else {
 		// Free list was empty, so allocate a new arena.
@@ -1021,7 +1020,7 @@ func (h *mheap) allocUserArenaChunk() *mspan {
 			for i := userArenaChunkBytes; i < size; i += userArenaChunkBytes {
 				s := h.allocMSpanLocked()
 				s.init(uintptr(v)+i, userArenaChunkPages)
-				h.userArena.readyList.insertBack(s)
+				h.userArena.globalFreeList.enqueue(s)
 			}
 			size = userArenaChunkBytes
 		}

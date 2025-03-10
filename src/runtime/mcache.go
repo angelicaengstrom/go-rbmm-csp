@@ -239,6 +239,7 @@ func (c *mcache) allocLarge(size uintptr, noscan bool) *mspan {
 
 	// Count the alloc in consistent, external stats.
 	stats := memstats.heapStats.acquire()
+	// Remove the inner size that is allocated to the mspan
 	atomic.Xadd64(&stats.largeAlloc, int64(npages*pageSize))
 	atomic.Xadd64(&stats.largeAllocCount, 1)
 	memstats.heapStats.release()

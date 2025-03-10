@@ -1764,6 +1764,95 @@ func UserArenaClone[T any](s T) T {
 	return arena_heapify(s).(T)
 }
 
+type UserRegion struct {
+	region *userRegion
+}
+
+func (r *UserRegion) GetRegion() *userRegion {
+	return r.region
+}
+
+func CreateUserRegion() *UserRegion {
+	return &UserRegion{createUserRegion()}
+}
+
+func (r *UserRegion) AllocateFromRegion(typ any) any {
+	return r.region.allocateFromRegion(typ)
+}
+
+func (r *UserRegion) RemoveUserRegion() {
+	r.region.removeRegion()
+}
+
+func CreateRegionChannel[T any](size int) (chan T, *UserRegion) {
+	region := createUserRegion()
+	var ch chan T
+	chPtr := (*uintptr)(unsafe.Pointer(&ch))
+	*chPtr = (uintptr)(unsafe.Pointer(region.makeChan(abi.TypeOf((*T)(nil)), size)))
+	return ch, &UserRegion{region: region}
+}
+
+func (r *UserRegion) AllocateInnerRegion() *UserRegion {
+	return &UserRegion{r.region.allocateInnerRegion()}
+}
+
+func (r *UserRegion) FreeUnusedMemory() {
+	r.region.freeUnusedMemory()
+}
+
+func (r *UserRegion) GetSize() uintptr {
+	return r.region.current.elemsize
+}
+
+func (r *UserRegion) GetBlock() *mspan {
+	return r.region.current
+}
+
+func (r *UserRegion) GetStartAddr() uintptr {
+	return r.region.current.base()
+}
+
+func (r *UserRegion) GetBase() uintptr {
+	return r.region.current.userArenaChunkFree.base.addr()
+}
+
+func (r *UserRegion) GetLimit() uintptr {
+	return r.region.current.userArenaChunkFree.limit.addr()
+}
+
+func (r *UserRegion) IncrementCounter() bool {
+	return r.region.incrementCounter()
+}
+
+func (r *UserRegion) DecrementCounter() {
+	r.region.decrementCounter()
+}
+
+func (r *UserRegion) IsEmptyLocalFreeList() bool {
+	return r.region.localFreeList.isEmpty()
+}
+
+func IsEmptyGlobalFreeList() bool {
+	return mheap_.userArena.globalFreeList.isEmpty()
+}
+
+type ConcurrentQueue[T any] struct {
+	cq *concurrentFreeList[T]
+}
+
+func (cq *ConcurrentQueue[T]) Init() {
+	cq.cq = &concurrentFreeList[T]{}
+	cq.cq.init()
+}
+
+func (cq *ConcurrentQueue[T]) Enqueue(elem T) {
+	cq.cq.enqueue(elem)
+}
+
+func (cq *ConcurrentQueue[T]) Dequeue() T {
+	return cq.cq.dequeue()
+}
+
 var AlignUp = alignUp
 
 func BlockUntilEmptyFinalizerQueue(timeout int64) bool {
