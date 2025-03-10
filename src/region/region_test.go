@@ -297,8 +297,38 @@ func BenchmarkReusalGC(b *testing.B) {
 
 const (
 	numWorkers  = 15
-	numRequests = 100000
+	numRequests = 10
 )
+
+type position struct {
+	x int
+	y int
+}
+
+func BenchmarkConcurrencyStruct(b *testing.B) {
+	debug.SetGCPercent(-1)
+	requests, r1 := region.CreateChannel[position](numRequests)
+
+	for i := 0; i < numWorkers; i++ {
+		if r1.IncRefCounter() {
+			go func() {
+				for j := 0; j < numRequests; j++ {
+					requests <- position{i, j}
+				}
+				r1.DecRefCounter()
+			}()
+		}
+	}
+
+	for i := 0; i < numRequests*numWorkers; i++ {
+		fmt.Println(<-requests)
+	}
+
+	close(requests)
+
+	r1.RemoveRegion()
+
+}
 
 func BenchmarkConcurrencyRegion(b *testing.B) {
 	debug.SetGCPercent(-1)

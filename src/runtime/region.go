@@ -75,7 +75,12 @@ func region_removeRegion(region unsafe.Pointer) {
 //
 //go:linkname region_createChannel region.runtime_region_createChannel
 func region_createChannel(region unsafe.Pointer, typ any, sz int) unsafe.Pointer {
-	return unsafe.Pointer(((*userRegion)(region)).makeChan(abi.TypeOf(typ), sz))
+	t := (*_type)(efaceOf(&typ).data)
+	if t.Kind_&abi.KindMask != abi.Pointer {
+		throw("allocateFromRegion: non-pointer type")
+	}
+	te := (*ptrtype)(unsafe.Pointer(t)).Elem
+	return unsafe.Pointer(((*userRegion)(region)).makeChan(te, sz))
 }
 
 // region_allocNestledRegion is a wrapper around (*userRegion).allocateInnerRegion.
