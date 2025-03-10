@@ -56,7 +56,6 @@ func CreateRegion() *Region {
 // region after it has been freed.
 func (r *Region) RemoveRegion() {
 	runtime_region_removeRegion(r.r)
-	r.r = nil
 }
 
 // AllocFromRegion creates a new *T in the provided region. The *T must not be used after
@@ -87,9 +86,7 @@ func (r *Region) IncRefCounter() bool {
 	return runtime_region_incRefCounter(r.r)
 }
 
-func (r *Region) DecRefCounter() {
-	runtime_region_decRefCounter(r.r)
-}
+func (r *Region) DecRefCounter() { runtime_region_decRefCounter(r.r) }
 
 //go:linkname reflect_region_allocFromRegion reflect.region_allocFromRegion
 func reflect_region_allocFromRegion(r *Region, typ any) any {

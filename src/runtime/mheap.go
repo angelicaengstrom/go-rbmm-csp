@@ -1147,14 +1147,15 @@ func (h *mheap) allocMSpanLocked() *mspan {
 		pp.mspancache.len = refillCount
 	}
 
+	// Pull off the last entry in the cache.
+	s := pp.mspancache.buf[pp.mspancache.len-1]
+	pp.mspancache.len--
+
 	stats := memstats.heapStats.acquire()
 	atomic.Xadd64(&stats.heapSpanCreated, int64(created))
 	atomic.Xadd64(&stats.heapSpanUsed, 1)
 	memstats.heapStats.release()
 
-	// Pull off the last entry in the cache.
-	s := pp.mspancache.buf[pp.mspancache.len-1]
-	pp.mspancache.len--
 	return s
 }
 
@@ -1681,7 +1682,6 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
 	switch typ {
 	case spanAllocHeap:
 		atomic.Xaddint64(&stats.inHeap, -int64(nbytes))
-		atomic.Xadd64(&stats.heapIntFrag, -int64(s.intFrag))
 	case spanAllocStack:
 		atomic.Xaddint64(&stats.inStacks, -int64(nbytes))
 	case spanAllocPtrScalarBits:

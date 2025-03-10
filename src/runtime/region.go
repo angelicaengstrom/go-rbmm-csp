@@ -393,7 +393,7 @@ func (r *userRegion) removeRegion() {
 	} else {
 		// This method will only be called by the calling goroutine, if this is called we can free the unused memory
 		// since the user won't be allocating anything more to the region
-		r.freeUnusedMemory()
+		//r.freeUnusedMemory()
 	}
 }
 
@@ -597,8 +597,9 @@ func (s *mspan) bump(typ *_type) unsafe.Pointer {
 		ptr = unsafe.Pointer(v)
 		// Update the internal fragmentation of the region block
 		stats := memstats.heapStats.acquire()
+
 		// TODO: Make IntFrag work properly, for both heapAlloc and regionAlloc
-		atomic.Xadd64(&stats.regionIntFrag, -int64(v-s.startAddr))
+		atomic.Xadd64(&stats.regionIntFrag, -int64(s.userArenaChunkFree.base.a-v))
 		memstats.heapStats.release()
 	}
 	if ptr == nil {
@@ -647,6 +648,7 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 		//buffered channel
 		c = (*hchan)(r.alloc(abi.TypeOf(hchan{})))
 		for i := 0; i < size; i++ {
+			r.alloc(elem)
 			c.refs = append(c.refs, r.alloc(elem))
 		}
 	}
@@ -657,7 +659,7 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 	lockInit(&c.lock, lockRankHchan)
 
 	// Since the entire buffer is already allocated, it is ok to free here
-	r.freeUnusedMemory()
+	//r.freeUnusedMemory()
 	return c
 }
 

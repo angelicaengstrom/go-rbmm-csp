@@ -209,11 +209,10 @@ func BenchmarkReusalRegion(b *testing.B) {
 		for i := 0; i < numAllocations; i++ {
 			allocationTimeStart = time.Now()
 			r1 := region.CreateRegion()
-			region.AllocFromRegion[[1000000]byte](r1)
-			region.AllocFromRegion[[2000000]byte](r1)
-			region.AllocFromRegion[[4000000]byte](r1)
-			region.AllocFromRegion[[8000000]byte](r1)
-			region.AllocFromRegion[[16000000]byte](r1)
+			region.AllocFromRegion[[10485]byte](r1)
+			region.AllocFromRegion[[524288]byte](r1)
+			region.AllocFromRegion[[1048576]byte](r1)
+			region.AllocFromRegion[[2097152]byte](r1)
 			allocationTime += time.Since(allocationTimeStart).Nanoseconds()
 
 			runtime.ReadMemStats(&memStats)
@@ -258,9 +257,9 @@ func BenchmarkReusalGC(b *testing.B) {
 		var allocationTimeStart time.Time
 		var allocationTime int64
 
-		var peakInternalFragmentation, peakExternalFragmentation, peakMemoryConsumption float64
+		var peakInternalFragmentation, peakExternalFragmentation float64
 
-		sizes := []int{1000000, 2000000, 4000000, 8000000, 16000000}
+		sizes := []int{10485, 524288, 1048576, 2097152}
 
 		for i := 0; i < numAllocations; i++ {
 			allocationTimeStart = time.Now()
@@ -271,16 +270,12 @@ func BenchmarkReusalGC(b *testing.B) {
 			allocationTime += time.Since(allocationTimeStart).Nanoseconds()
 
 			runtime.ReadMemStats(&memStats)
-			if peakInternalFragmentation < float64(memStats.HeapIntFrag)/float64(memStats.HeapLargeInUse) {
-				peakInternalFragmentation = float64(memStats.HeapIntFrag) / float64(memStats.HeapLargeInUse)
+			if peakInternalFragmentation < float64(memStats.HeapIntFrag)/float64(memStats.HeapAlloc) {
+				peakInternalFragmentation = float64(memStats.HeapIntFrag) / float64(memStats.HeapAlloc)
 			}
 
 			if peakExternalFragmentation < float64(memStats.HeapIdle)/float64(memStats.HeapSys) {
 				peakExternalFragmentation = float64(memStats.HeapIdle) / float64(memStats.HeapSys)
-			}
-
-			if peakMemoryConsumption < float64(memStats.HeapLargeInUse) {
-				peakMemoryConsumption = float64(memStats.HeapLargeInUse)
 			}
 
 			runtime.GC()
@@ -292,11 +287,116 @@ func BenchmarkReusalGC(b *testing.B) {
 		ExtFrag += peakExternalFragmentation
 		IntFrag += peakInternalFragmentation
 		T_A += float64(allocationTime)
-		b.Log(peakMemoryConsumption, " M_C (B)")
 	}
 
 	b.ReportMetric(float64(Reuse)/float64(rounds), "Reuse%")
 	b.ReportMetric(float64(IntFrag)/float64(rounds), "IntFrag%")
 	b.ReportMetric(float64(ExtFrag)/float64(rounds), "ExtFrag%")
 	b.ReportMetric(float64(T_A)/float64(rounds), "T_alloc(ns)")
+}
+
+const (
+	numWorkers  = 15
+	numRequests = 100000
+)
+
+func BenchmarkConcurrencyRegion(b *testing.B) {
+	debug.SetGCPercent(-1)
+
+	rounds := 10
+
+	var T_C, T_L, Theta, Err float64
+
+	for r := 0; r < rounds; r++ {
+		var latencyTime, err float64
+		startTime := time.Now()
+		requests, r1 := region.CreateChannel[int](numRequests)
+
+		for i := 0; i < numWorkers; i++ {
+			if r1.IncRefCounter() {
+				go func() {
+					for j := 0; j < numRequests; j++ {
+						latencyStart := time.Now()
+						requests <- i
+						latencyTime += float64(time.Since(latencyStart).Milliseconds())
+					}
+					r1.DecRefCounter()
+				}()
+			}
+		}
+
+		var responses [numWorkers]int
+
+		for i := 0; i < numRequests*numWorkers; i++ {
+			responses[<-requests]++
+		}
+
+		close(requests)
+
+		r1.RemoveRegion()
+		T_C += float64(time.Since(startTime).Milliseconds())
+
+		for _, res := range responses {
+			if res != numRequests {
+				err += float64(numRequests - res)
+			}
+		}
+
+		Err += err / float64(numRequests)
+		T_L += latencyTime
+		Theta += float64(numRequests) / T_C
+	}
+	b.ReportMetric(Err/float64(rounds), "Err%")
+	b.ReportMetric(float64(T_C)/float64(rounds), "T_C(ms)")
+	b.ReportMetric(float64(T_L)/float64(rounds), "T_L(ms)")
+	b.ReportMetric(float64(Theta)/float64(rounds), "Theta(op/ms)")
+}
+
+func BenchmarkConcurrencyGC(b *testing.B) {
+	debug.SetGCPercent(-1)
+
+	rounds := 10
+
+	var T_C, T_L, Theta, Err float64
+
+	for r := 0; r < rounds; r++ {
+		var latencyTime, err float64
+		startTime := time.Now()
+		requests := make(chan int, numRequests)
+
+		for i := 0; i < numWorkers; i++ {
+			go func() {
+				for j := 0; j < numRequests; j++ {
+					latencyStart := time.Now()
+					requests <- i
+					latencyTime += float64(time.Since(latencyStart).Milliseconds())
+				}
+			}()
+		}
+
+		var responses [numWorkers]int
+
+		for i := 0; i < numRequests*numWorkers; i++ {
+			responses[<-requests]++
+		}
+
+		close(requests)
+
+		runtime.GC()
+		T_C += float64(time.Since(startTime).Milliseconds())
+
+		for _, res := range responses {
+			if res != numRequests {
+				err += float64(numRequests - res)
+			}
+		}
+
+		Err += err / float64(numRequests)
+		T_L += latencyTime
+		Theta += float64(numRequests) / T_C
+	}
+	b.ReportMetric(Err/float64(rounds), "Err%")
+	b.ReportMetric(float64(T_C)/float64(rounds), "T_C(ms)")
+	b.ReportMetric(float64(T_L)/float64(rounds), "T_L(ms)")
+	b.ReportMetric(float64(Theta)/float64(rounds), "Theta(op/ms)")
 }
