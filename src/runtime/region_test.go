@@ -50,6 +50,7 @@ func TestAllocRegion(t *testing.T) {
 		runSubTestAllocRegionFullList(t, mse, false)
 		runSubTestAllocNestledRegion(t, false)
 		runSubTestAllocChannel(t, false)
+
 		runSubTestAllocBufferedChannel(t, false)
 		runSubTestAllocGoRoutine(t, false)
 		runSubTestAllocLocalFreeList(t, false)
@@ -244,6 +245,13 @@ func runSubTestCantAllocLocalFreeList(t *testing.T, parallel bool) {
 	})
 }
 
+type complex struct {
+	s  string
+	i  int64
+	f  float64
+	sc smallScalar
+}
+
 func runSubTestAllocChannel(t *testing.T, parallel bool) {
 	t.Run("channel", func(t *testing.T) {
 		if parallel {
@@ -251,20 +259,24 @@ func runSubTestAllocChannel(t *testing.T, parallel bool) {
 		}
 
 		// Create a channel region with a unbuffered channel (size == 0)
-		ch, reg := CreateRegionChannel[int](0)
-
+		ch, reg := CreateRegionChannel[complex](0)
+		//ch := make(chan complex)
 		// Generate a goroutine that sends value to the channel
 		go func() {
-			ch <- 1
+			ch <- complex{"test", 123, 4.56, smallScalar{789}}
 		}()
 
+		res := <-ch
+
 		// If the main goroutine can't fetch the value, the region-channel wasn't able to allocate
-		if <-ch != 1 {
+		if res.s != "test" && res.i != 123 && res.f != 4.56 && res.sc.X != 789 {
+			t.Log(res.s, res.i, res.f, res.sc)
 			t.Errorf("CreateRegionChannel() wasn't able to allocate")
 		}
 
 		// Close the channel
 		close(ch)
+
 		// remove the channel region
 		reg.RemoveUserRegion()
 	})

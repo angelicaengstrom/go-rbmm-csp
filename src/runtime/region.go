@@ -75,12 +75,15 @@ func region_removeRegion(region unsafe.Pointer) {
 //
 //go:linkname region_createChannel region.runtime_region_createChannel
 func region_createChannel(region unsafe.Pointer, typ any, sz int) unsafe.Pointer {
+	if sz < 0 {
+		panic("createChannel: negative buffer-size")
+	}
 	t := (*_type)(efaceOf(&typ).data)
 	if t.Kind_&abi.KindMask != abi.Pointer {
-		throw("allocateFromRegion: non-pointer type")
+		throw("createChannel: non-pointer type")
 	}
-	te := (*ptrtype)(unsafe.Pointer(t)).Elem
-	return unsafe.Pointer(((*userRegion)(region)).makeChan(te, sz))
+	t = (*ptrtype)(unsafe.Pointer(t)).Elem
+	return unsafe.Pointer(((*userRegion)(region)).makeChan(t, sz))
 }
 
 // region_allocNestledRegion is a wrapper around (*userRegion).allocateInnerRegion.
@@ -154,6 +157,8 @@ type userRegion struct {
 	// depth is the current depth of the inner region, used to allocate a proper inner size
 	// 0 if the region is non-nestled
 	depth uintptr
+
+	lock mutex
 }
 
 type node[T any] struct {
@@ -241,6 +246,7 @@ func createUserRegion() *userRegion {
 	return r
 }
 
+// TODO: Generate a new region block with a predetermined size??? The goroutines are long-lived
 // newRegionBlock returns a new region block, either from the local free-list or as a large block from the heap
 func newRegionBlock(r *userRegion) *mspan {
 	var span *mspan
@@ -398,7 +404,7 @@ func (r *userRegion) removeRegion() {
 	} else {
 		// This method will only be called by the calling goroutine, if this is called we can free the unused memory
 		// since the user won't be allocating anything more to the region
-		//r.freeUnusedMemory()
+		r.freeUnusedMemory()
 	}
 }
 
@@ -515,7 +521,11 @@ func (r *userRegion) allocateFromRegion(typ any) any {
 		throw("allocateFromRegion: non-pointer type")
 	}
 	te := (*ptrtype)(unsafe.Pointer(t)).Elem
+
+	lock(&r.lock)
 	x := r.alloc(te)
+	unlock(&r.lock)
+
 	var result any
 	e := efaceOf(&result)
 	e._type = t
@@ -643,6 +653,7 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 		panic(plainError("makechan: size out of range"))
 	}
 
+	lock(&r.lock)
 	var c *hchan
 	switch {
 	case mem == 0:
@@ -657,6 +668,8 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 			c.refs = append(c.refs, r.alloc(elem))
 		}
 	}
+	unlock(&r.lock)
+
 	c.elemsize = uint16(elem.Size_)
 	c.elemtype = elem
 	c.dataqsiz = uint(size)
@@ -719,8 +732,10 @@ func (r *userRegion) allocateInnerRegion() *userRegion {
 		panic("Can't allocate deeper than a depth of 3")
 	}
 
+	lock(&r.lock)
 	// Initialize the inner region
 	inner := (*userRegion)(r.alloc(abi.TypeOf(userRegion{})))
+	unlock(&r.lock)
 	inner.parent = r
 	inner.localFreeList = &concurrentFreeList[*mspan]{}
 	inner.localFreeList.init()
@@ -749,12 +764,14 @@ func (r *userRegion) newInnerRegionBlock(block *_type) *mspan {
 	// Allocates a block to the outer region with a predetermined size
 	startAddr := r.current.startAddr
 	base := r.current.userArenaChunkFree.base.a
+	lock(&r.lock)
 	r.alloc(block)
 	// We may have to update the base address if we had to allocate a new block for the inner region
 	if r.current.startAddr != startAddr {
 		base = r.current.startAddr
 	}
 	limit := r.current.userArenaChunkFree.base.a
+	unlock(&r.lock)
 
 	// The range of the inner region is the bounds before and after allocation on the parent
 	s := r.generateSpanFromRange(base, limit)

@@ -1788,6 +1788,7 @@ func CreateRegionChannel[T any](size int) (chan T, *UserRegion) {
 	region := createUserRegion()
 	var ch chan T
 	chPtr := (*uintptr)(unsafe.Pointer(&ch))
+
 	*chPtr = (uintptr)(unsafe.Pointer(region.makeChan(abi.TypeOf((*T)(nil)), size)))
 	return ch, &UserRegion{region: region}
 }

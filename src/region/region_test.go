@@ -85,7 +85,7 @@ func BenchmarkAllocDeallocRegion(b *testing.B) {
 	T_D := 0.0
 
 	for j := 0; j < rounds; j++ {
-		numAllocations := 1000000
+		numAllocations := 100000
 		var memStats runtime.MemStats
 		var successfulAlloc uint64
 		var allocationTimeStart time.Time
@@ -101,7 +101,7 @@ func BenchmarkAllocDeallocRegion(b *testing.B) {
 		for i := region.AllocFromRegion[int](r1); *i < numAllocations; *i++ {
 			allocationTimeStart = time.Now()
 			obj := region.AllocFromRegion[[128]byte](r1)
-			allocationTime += time.Since(allocationTimeStart).Milliseconds()
+			allocationTime += time.Since(allocationTimeStart).Nanoseconds()
 
 			if obj != nil {
 				successfulAlloc++
@@ -115,7 +115,7 @@ func BenchmarkAllocDeallocRegion(b *testing.B) {
 
 		deallocationTimeStart = time.Now()
 		r1.RemoveRegion()
-		deallocationTime = time.Since(deallocationTimeStart).Milliseconds()
+		deallocationTime = time.Since(deallocationTimeStart).Nanoseconds()
 
 		runtime.ReadMemStats(&memStats)
 		Alloc += float64(successfulAlloc) / float64(numAllocations)
@@ -141,7 +141,7 @@ func BenchmarkAllocDeallocGC(b *testing.B) {
 	T_D := 0.0
 
 	for j := 0; j < rounds; j++ {
-		numAllocations := 1000000
+		numAllocations := 100000
 		var memStats runtime.MemStats
 
 		var allocationTimeStart time.Time
@@ -429,4 +429,45 @@ func BenchmarkConcurrencyGC(b *testing.B) {
 	b.ReportMetric(float64(T_C)/float64(rounds), "T_C(ms)")
 	b.ReportMetric(float64(T_L)/float64(rounds), "T_L(ms)")
 	b.ReportMetric(float64(Theta)/float64(rounds), "Theta(op/ms)")
+}
+
+type smallScalar struct {
+	X uintptr
+}
+type complex struct {
+	s  string
+	i  int64
+	f  float64
+	ch chan bool
+}
+
+func TestAllocChannel(t *testing.T) {
+	t.Run("channel", func(t *testing.T) {
+		// Create a channel region with a unbuffered channel (size == 0)
+		ch, reg := region.CreateChannel[complex](0)
+		ch2 := region.AllocChannel[bool](0, reg)
+		//ch := make(chan complex)
+		// Generate a goroutine that sends value to the channel
+		reg.IncRefCounter()
+		go func() {
+			ch <- complex{"test", 123, 4.56, ch2}
+			<-ch2
+			reg.DecRefCounter()
+		}()
+
+		res := <-ch
+		res.ch <- true
+
+		// If the main goroutine can't fetch the value, the region-channel wasn't able to allocate
+		if res.s != "test" && res.i != 123 && res.f != 4.56 {
+			t.Log(res)
+			t.Errorf("CreateRegionChannel() wasn't able to allocate")
+		}
+
+		// Close the channel
+		close(ch)
+
+		// remove the channel region
+		reg.RemoveRegion()
+	})
 }

@@ -47,7 +47,7 @@ type Region struct {
 
 // CreateRegion allocates a new region.
 func CreateRegion() *Region {
-	return &Region{r: runtime_region_createRegion()}
+	return &Region{r: runtime_region_createRegion(0)}
 }
 
 // RemoveRegion frees the region (and all objects allocated from the region) so that
@@ -76,10 +76,14 @@ func AllocFromRegion[T any](r *Region) *T {
 // but this fault is also not guaranteed.
 func CreateChannel[T any](size int) (chan T, *Region) {
 	r := CreateRegion()
+	return AllocChannel[T](size, r), r
+}
+
+func AllocChannel[T any](size int, r *Region) chan T {
 	var ch chan T
 	chPtr := (*uintptr)(unsafe.Pointer(&ch))
 	*chPtr = (uintptr)(runtime_region_createChannel(r.r, reflectlite.TypeOf((*T)(nil)), size))
-	return ch, r
+	return ch
 }
 
 func (r *Region) IncRefCounter() bool {
@@ -94,7 +98,7 @@ func reflect_region_allocFromRegion(r *Region, typ any) any {
 }
 
 //go:linkname runtime_region_createRegion
-func runtime_region_createRegion() unsafe.Pointer
+func runtime_region_createRegion(nbytes int) unsafe.Pointer
 
 //go:linkname runtime_region_allocFromRegion
 func runtime_region_allocFromRegion(region unsafe.Pointer, typ any) any

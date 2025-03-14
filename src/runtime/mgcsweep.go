@@ -756,9 +756,7 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 			s.needzero = 1
 			stats := memstats.heapStats.acquire()
 			atomic.Xadd64(&stats.smallFreeCount[spc.sizeclass()], int64(nfreed))
-			if s.intFrag > 0 {
-				atomic.Xadd64(&stats.heapIntFrag, -int64(s.intFrag))
-			}
+			atomic.Xadd64(&stats.heapIntFrag, -int64(s.intFrag))
 			memstats.heapStats.release()
 
 			// Count the frees in the inconsistent, internal stats.
@@ -795,9 +793,7 @@ func (sl *sweepLocked) sweep(preserve bool) bool {
 			stats := memstats.heapStats.acquire()
 			atomic.Xadd64(&stats.largeFreeCount, 1)
 			atomic.Xadd64(&stats.largeFree, int64(size))
-			if s.intFrag > 0 {
-				atomic.Xadd64(&stats.heapIntFrag, -int64(s.intFrag))
-			}
+			atomic.Xadd64(&stats.heapIntFrag, -int64(s.intFrag))
 			memstats.heapStats.release()
 
 			// Count the free in the inconsistent, internal stats.
