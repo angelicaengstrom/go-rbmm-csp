@@ -1788,17 +1788,20 @@ func CreateRegionChannel[T any](size int) (chan T, *UserRegion) {
 	region := createUserRegion()
 	var ch chan T
 	chPtr := (*uintptr)(unsafe.Pointer(&ch))
+	var typ any
+	typ = abi.TypeOf((*T)(nil))
+	t := (*_type)(efaceOf(&typ).data)
+	if t.Kind_&abi.KindMask != abi.Pointer {
+		throw("createChannel: non-pointer type")
+	}
+	t = (*ptrtype)(unsafe.Pointer(t)).Elem
 
-	*chPtr = (uintptr)(unsafe.Pointer(region.makeChan(abi.TypeOf((*T)(nil)), size)))
+	*chPtr = (uintptr)(unsafe.Pointer(region.makeChan(t, size)))
 	return ch, &UserRegion{region: region}
 }
 
-func (r *UserRegion) AllocateInnerRegion() *UserRegion {
-	return &UserRegion{r.region.allocateInnerRegion()}
-}
-
-func (r *UserRegion) FreeUnusedMemory() {
-	r.region.freeUnusedMemory()
+func (r *UserRegion) AllocateInnerRegion(sz int) *UserRegion {
+	return &UserRegion{r.region.allocateInnerRegion(sz)}
 }
 
 func (r *UserRegion) GetSize() uintptr {

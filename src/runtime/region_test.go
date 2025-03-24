@@ -136,7 +136,7 @@ func runSubTestAllocNestledRegion(t *testing.T, parallel bool) {
 		// Create a new outer region.
 		outer := CreateUserRegion()
 		_, prevAllocated := ReadMemStatsSlow()
-		inner := outer.AllocateInnerRegion()
+		inner := outer.AllocateInnerRegion(int(UserArenaChunkBytes / 4))
 		x := inner.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{5})).(*smallScalar)
 		// Should be able to allocate within the inner region
 		if x == nil {
@@ -170,7 +170,7 @@ func runSubTestAllocLocalFreeList(t *testing.T, parallel bool) {
 
 		// Create a new outer region.
 		outer := CreateUserRegion()
-		inner := outer.AllocateInnerRegion()
+		inner := outer.AllocateInnerRegion(int(UserArenaChunkBytes / 4))
 		x := inner.AllocateFromRegion(reflectlite.TypeOf(&smallScalar{5})).(*smallScalar)
 		if x == nil {
 			t.Errorf("runSubTestAllocNestledRegion() wasn't able to allocate ")
@@ -213,11 +213,11 @@ func runSubTestCantAllocLocalFreeList(t *testing.T, parallel bool) {
 		// Create a new outer region.
 		r1 := CreateUserRegion()
 		// Depth 1
-		r2 := r1.AllocateInnerRegion()
+		r2 := r1.AllocateInnerRegion(int(UserArenaChunkBytes / 4))
 		// Depth 2
-		r3 := r2.AllocateInnerRegion()
+		r3 := r2.AllocateInnerRegion(int(UserArenaChunkBytes / 16))
 		r3.RemoveUserRegion() // Place the smaller region to the local free-list
-		r4 := r2.AllocateInnerRegion()
+		r4 := r2.AllocateInnerRegion(int(UserArenaChunkBytes / 16))
 		r4.RemoveUserRegion() // Place the smaller region to the local free-list
 
 		if r2.IsEmptyLocalFreeList() {

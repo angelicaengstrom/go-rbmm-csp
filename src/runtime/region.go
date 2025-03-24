@@ -89,8 +89,8 @@ func region_createChannel(region unsafe.Pointer, typ any, sz int) unsafe.Pointer
 // region_allocNestledRegion is a wrapper around (*userRegion).allocateInnerRegion.
 //
 //go:linkname region_allocNestledRegion region.runtime_region_allocNestledRegion
-func region_allocNestledRegion(region unsafe.Pointer) unsafe.Pointer {
-	return unsafe.Pointer((*userRegion)(region).allocateInnerRegion())
+func region_allocNestledRegion(region unsafe.Pointer, sz int) unsafe.Pointer {
+	return unsafe.Pointer((*userRegion)(region).allocateInnerRegion(sz))
 }
 
 //go:linkname region_incRefCounter region.runtime_region_incRefCounter
@@ -401,10 +401,6 @@ func (r *userRegion) removeRegion() {
 		r.freeUserRegion()
 	} else if refs < 0 {
 		panic("region double free")
-	} else {
-		// This method will only be called by the calling goroutine, if this is called we can free the unused memory
-		// since the user won't be allocating anything more to the region
-		r.freeUnusedMemory()
 	}
 }
 
@@ -677,7 +673,6 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 	lockInit(&c.lock, lockRankHchan)
 
 	// Since the entire buffer is already allocated, it is ok to free here
-	//r.freeUnusedMemory()
 	return c
 }
 
@@ -718,15 +713,9 @@ func (r *userRegion) decrementCounter() {
 	}
 }
 
-const (
-	smallInnerRegionBlockBytes  = regionBlockBytes / 64
-	mediumInnerRegionBlockBytes = regionBlockBytes / 16
-	largeInnerRegionBlockBytes  = regionBlockBytes / 4
-)
-
 // allocateInnerRegion returns a userRegion within the parent region with a predetermined size depending on
 // the depth of the child region
-func (r *userRegion) allocateInnerRegion() *userRegion {
+func (r *userRegion) allocateInnerRegion(sz int) *userRegion {
 	// Currently only able to allocate on a depth of 3
 	if r.depth > 2 {
 		panic("Can't allocate deeper than a depth of 3")
@@ -741,16 +730,24 @@ func (r *userRegion) allocateInnerRegion() *userRegion {
 	inner.localFreeList.init()
 	inner.depth = r.depth + 1
 	inner.refs.Store(1)
-	var b *_type
-	// Allocate different amount of bytes to the inner region block, depending on it's depth
-	switch inner.depth {
-	case 1:
-		b = abi.TypeOf([largeInnerRegionBlockBytes]byte{})
-	case 2:
-		b = abi.TypeOf([mediumInnerRegionBlockBytes]byte{})
-	default:
-		b = abi.TypeOf([smallInnerRegionBlockBytes]byte{})
+
+	npages := sz / pageSize
+
+	// Round up the number of pages used in this block
+	if npages == 0 {
+		npages++
 	}
+
+	sz = npages * pageSize
+
+	if sz > regionBlockBytesMax {
+		panic("Inner region too large for outer region block")
+	} else if sz <= 0 {
+		panic("Inner region too small for outer region block")
+	}
+
+	b := &abi.Type{Size_: uintptr(sz), Align_: 1, Kind_: abi.Array}
+
 	systemstack(func() {
 		inner.current = r.newInnerRegionBlock(b)
 	})
@@ -778,6 +775,36 @@ func (r *userRegion) newInnerRegionBlock(block *_type) *mspan {
 	s.nestled = true // the span is allocated at a depth > 0, therefore it is nestled
 	return s
 }
+
+// generateSpanFromRange generates a region block between base and limit
+//
+// The range between base and limit has to be divisible by pageSize
+func (r *userRegion) generateSpanFromRange(base uintptr, limit uintptr) *mspan {
+	// Generate a new address range based on base and limit
+	rng := makeAddrRange(base, limit)
+	nbytes := rng.size() // The number of bytes that the range contains
+	if nbytes%pageSize != 0 {
+		panic("Number of bytes in region aren't divisible by pageSize")
+	}
+
+	npages := nbytes / pageSize
+
+	lock(&mheap_.lock)
+	s := mheap_.allocMSpanLocked()
+	unlock(&mheap_.lock)
+
+	// Initialize the region block
+	s.init(base, npages)
+	s.isUserArenaChunk = true
+	s.userArenaChunkFree = rng
+	s.elemsize = nbytes
+	s.limit = limit
+	s.needzero = 0 // Should already have been zeroed by the outer region
+
+	return s
+}
+
+/*
 
 // freeUnusedMemory is a method that frees the end of the region block that aren't used. Useful when it is
 // known that the region isn't going to allocate any more memory, making the pages useful for other regions
@@ -825,34 +852,4 @@ func (r *userRegion) freeUnusedMemory() {
 			r.freeUserRegionBlock(s, unsafe.Pointer(s.base()))
 		}
 	}
-}
-
-// generateSpanFromRange generates a region block between base and limit
-//
-// The range between base and limit has to be divisible by pageSize
-func (r *userRegion) generateSpanFromRange(base uintptr, limit uintptr) *mspan {
-	// Generate a new address range based on base and limit
-	rng := makeAddrRange(base, limit)
-	nbytes := rng.size() // The number of bytes that the range contains
-	if nbytes%pageSize != 0 {
-		panic("Number of bytes in region aren't divisible by pageSize")
-	}
-	if nbytes < smallInnerRegionBlockBytes {
-		panic("Size of region is too small")
-	}
-
-	npages := nbytes / pageSize
-
-	lock(&mheap_.lock)
-	s := mheap_.allocMSpanLocked()
-	unlock(&mheap_.lock)
-
-	// Initialize the region block
-	s.init(base, npages)
-	s.isUserArenaChunk = true
-	s.userArenaChunkFree = rng
-	s.elemsize = nbytes
-	s.limit = limit
-	s.needzero = 0 // Should already have been zeroed by the outer region
-	return s
-}
+}*/

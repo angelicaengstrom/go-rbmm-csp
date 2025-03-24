@@ -28,17 +28,6 @@ func TestSmokeLarge(t *testing.T) {
 	}
 }
 
-func TestNestledRegion(t *testing.T) {
-	outer := region.CreateRegion()
-	inner := region.AllocFromRegion[region.Region](outer)
-
-	for i := 0; i < 10*64; i++ {
-		_ = region.AllocFromRegion[T2](inner)
-	}
-	inner.RemoveRegion()
-	outer.RemoveRegion()
-}
-
 func TestChannelRegion(t *testing.T) {
 	ch, reg := region.CreateChannel[int](0)
 	go func() {
@@ -469,5 +458,27 @@ func TestAllocChannel(t *testing.T) {
 
 		// remove the channel region
 		reg.RemoveRegion()
+	})
+}
+
+func TestAllocMatrix(t *testing.T) {
+	t.Run("matrix", func(t *testing.T) {
+		reg := region.CreateRegion()
+		m := region.AllocFromRegion[[2048][2048]int](reg)
+		(*m)[0][0] = 1
+		// remove the region
+		reg.RemoveRegion()
+	})
+}
+
+func TestAllocInnerRegion(t *testing.T) {
+	t.Run("inner", func(t *testing.T) {
+		outer := region.CreateRegion()
+		inner := region.AllocInnerRegion(8200, outer)
+
+		_ = region.AllocFromRegion[int](inner)
+
+		inner.RemoveRegion()
+		outer.RemoveRegion()
 	})
 }
