@@ -951,7 +951,7 @@ func nextFreeFast(s *mspan) gclinkptr {
 //
 // Must run in a non-preemptible context since otherwise the owner of
 // c could change.
-func (c *mcache) nextFree(spc spanClass) (v gclinkptr, s *mspan, checkGCTrigger bool) {
+func (c *mcache) nextFree(spc spanClass, firstSize uintptr) (v gclinkptr, s *mspan, checkGCTrigger bool) {
 	s = c.alloc[spc]
 	checkGCTrigger = false
 	freeIndex := s.nextFreeIndex()
@@ -961,7 +961,7 @@ func (c *mcache) nextFree(spc spanClass) (v gclinkptr, s *mspan, checkGCTrigger 
 			println("runtime: s.allocCount=", s.allocCount, "s.nelems=", s.nelems)
 			throw("s.allocCount != s.nelems && freeIndex == s.nelems")
 		}
-		c.refill(spc)
+		c.refill(spc, firstSize)
 		checkGCTrigger = true
 		s = c.alloc[spc]
 
@@ -1096,6 +1096,7 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 }
 
 func mallocgcTiny(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uintptr) {
+	firstSize := size
 	// Set mp.mallocing to keep from being preempted by GC.
 	mp := acquirem()
 	if doubleCheckMalloc {
@@ -1173,7 +1174,7 @@ func mallocgcTiny(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uint
 
 	v := nextFreeFast(span)
 	if v == 0 {
-		v, span, checkGCTrigger = c.nextFree(tinySpanClass)
+		v, span, checkGCTrigger = c.nextFree(tinySpanClass, firstSize)
 	}
 	x := unsafe.Pointer(v)
 	(*[2]uint64)(x)[0] = 0
@@ -1283,15 +1284,7 @@ func mallocgcSmallNoscan(size uintptr, typ *_type, needzero bool) (unsafe.Pointe
 
 	v := nextFreeFast(span)
 	if v == 0 {
-		v, span, checkGCTrigger = c.nextFree(spc)
-	}
-
-	span.intFrag = uint64(size) - uint64(firstSize)
-
-	if span.intFrag > 0 {
-		stats := memstats.heapStats.acquire()
-		atomic.Xadd64(&stats.heapIntFrag, int64(size-firstSize))
-		memstats.heapStats.release()
+		v, span, checkGCTrigger = c.nextFree(spc, firstSize)
 	}
 
 	x := unsafe.Pointer(v)
@@ -1378,7 +1371,7 @@ func mallocgcSmallScanNoHeader(size uintptr, typ *_type, needzero bool) (unsafe.
 
 	v := nextFreeFast(span)
 	if v == 0 {
-		v, span, checkGCTrigger = c.nextFree(spc)
+		v, span, checkGCTrigger = c.nextFree(spc, firstSize)
 	}
 	x := unsafe.Pointer(v)
 	if needzero && span.needzero != 0 {
@@ -1392,14 +1385,6 @@ func mallocgcSmallScanNoHeader(size uintptr, typ *_type, needzero bool) (unsafe.
 		c.scanAlloc += heapSetTypeNoHeader(uintptr(x), size, typ, span)
 	}
 	size = uintptr(class_to_size[sizeclass])
-
-	span.intFrag = uint64(size) - uint64(firstSize)
-
-	if span.intFrag > 0 {
-		stats := memstats.heapStats.acquire()
-		atomic.Xadd64(&stats.heapIntFrag, int64(size-firstSize))
-		memstats.heapStats.release()
-	}
 
 	// Ensure that the stores above that initialize x to
 	// type-safe memory and set the heap bits occur before
@@ -1486,15 +1471,7 @@ func mallocgcSmallScanHeader(size uintptr, typ *_type, needzero bool) (unsafe.Po
 
 	v := nextFreeFast(span)
 	if v == 0 {
-		v, span, checkGCTrigger = c.nextFree(spc)
-	}
-
-	span.intFrag = uint64(size) - uint64(firstSize)
-
-	if span.intFrag > 0 {
-		stats := memstats.heapStats.acquire()
-		atomic.Xadd64(&stats.heapIntFrag, int64(size-firstSize))
-		memstats.heapStats.release()
+		v, span, checkGCTrigger = c.nextFree(spc, firstSize)
 	}
 
 	x := unsafe.Pointer(v)
@@ -1556,7 +1533,6 @@ func mallocgcSmallScanHeader(size uintptr, typ *_type, needzero bool) (unsafe.Po
 }
 
 func mallocgcLarge(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uintptr) {
-	firstSize := size
 	// Set mp.mallocing to keep from being preempted by GC.
 	mp := acquirem()
 	if doubleCheckMalloc {
@@ -1578,14 +1554,6 @@ func mallocgcLarge(size uintptr, typ *_type, needzero bool) (unsafe.Pointer, uin
 	span.allocCount = 1
 	span.largeType = nil // Tell the GC not to look at this yet.
 	size = span.elemsize
-
-	span.intFrag = uint64(size) - uint64(firstSize)
-
-	if span.intFrag > 0 {
-		stats := memstats.heapStats.acquire()
-		atomic.Xadd64(&stats.heapIntFrag, int64(size-firstSize))
-		memstats.heapStats.release()
-	}
 
 	x := unsafe.Pointer(span.base())
 

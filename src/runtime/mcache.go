@@ -145,7 +145,7 @@ func getMCache(mp *m) *mcache {
 //
 // Must run in a non-preemptible context since otherwise the owner of
 // c could change.
-func (c *mcache) refill(spc spanClass) {
+func (c *mcache) refill(spc spanClass, firstSize uintptr) {
 	// Return the current cached span to the central lists.
 	s := c.alloc[spc]
 
@@ -163,6 +163,11 @@ func (c *mcache) refill(spc spanClass) {
 		stats := memstats.heapStats.acquire()
 		slotsUsed := int64(s.allocCount) - int64(s.allocCountBeforeCache)
 		atomic.Xadd64(&stats.smallAllocCount[spc.sizeclass()], slotsUsed)
+
+		s.intFrag = uint64(s.elemsize) - uint64(firstSize)
+		if s.intFrag > 0 {
+			atomic.Xadd64(&stats.heapIntFrag, int64(s.intFrag))
+		}
 
 		// Flush tinyAllocs.
 		if spc == tinySpanClass {
@@ -237,8 +242,13 @@ func (c *mcache) allocLarge(size uintptr, noscan bool) *mspan {
 		throw("out of memory")
 	}
 
+	s.intFrag = uint64(s.elemsize) - uint64(size)
+
 	// Count the alloc in consistent, external stats.
 	stats := memstats.heapStats.acquire()
+	if s.intFrag > 0 {
+		atomic.Xadd64(&stats.heapIntFrag, int64(s.intFrag))
+	}
 	// Remove the inner size that is allocated to the mspan
 	atomic.Xadd64(&stats.largeAlloc, int64(npages*pageSize))
 	atomic.Xadd64(&stats.largeAllocCount, 1)

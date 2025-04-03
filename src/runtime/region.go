@@ -50,8 +50,8 @@ import (
 // region_createRegion is a wrapper around createUserRegion.
 //
 //go:linkname region_createRegion region.runtime_region_createRegion
-func region_createRegion() unsafe.Pointer {
-	return unsafe.Pointer(createUserRegion())
+func region_createRegion(sz int) unsafe.Pointer {
+	return unsafe.Pointer(createUserRegion(uintptr(sz)))
 }
 
 // region_allocFromRegion is a wrapper around (*userRegion).allocateFromRegion, except that typ
@@ -67,8 +67,8 @@ func region_allocFromRegion(region unsafe.Pointer, typ any) any {
 // region_removeRegion is a wrapper around (*userRegion).removeRegion.
 //
 //go:linkname region_removeRegion region.runtime_region_removeRegion
-func region_removeRegion(region unsafe.Pointer) {
-	((*userRegion)(region)).removeRegion()
+func region_removeRegion(region unsafe.Pointer) int {
+	return ((*userRegion)(region)).removeRegion()
 }
 
 // region_createChannel is a wrapper around (*userRegion).makeChan.
@@ -99,8 +99,8 @@ func region_incRefCounter(region unsafe.Pointer) bool {
 }
 
 //go:linkname region_decRefCounter region.runtime_region_decRefCounter
-func region_decRefCounter(region unsafe.Pointer) {
-	(*userRegion)(region).decrementCounter()
+func region_decRefCounter(region unsafe.Pointer) int {
+	return (*userRegion)(region).decrementCounter()
 }
 
 const (
@@ -159,6 +159,24 @@ type userRegion struct {
 	depth uintptr
 
 	lock mutex
+}
+
+type WaitGroup struct {
+	counter atomic.Int32
+}
+
+func (wg *WaitGroup) Add(delta int) {
+	wg.counter.Add(int32(delta))
+}
+
+func (wg *WaitGroup) Done() {
+	wg.counter.Add(-1)
+}
+
+func (wg *WaitGroup) Wait() {
+	for wg.counter.Load() > 0 {
+		// Simulate waiting
+	}
 }
 
 type node[T any] struct {
@@ -235,34 +253,55 @@ func (l *concurrentFreeList[T]) isEmpty() bool {
 // createUserRegion creates a new userRegion ready to be used.
 //
 // This method is only used for regions at depth 0
-func createUserRegion() *userRegion {
+func createUserRegion(sz uintptr) *userRegion {
 	r := new(userRegion)
 	r.localFreeList = &concurrentFreeList[*mspan]{}
 	r.localFreeList.init()
-	r.current = newRegionBlock(r)
+	r.current = newRegionBlock(r, sz)
 	r.refs.Store(1)
 	r.parent = nil
 	r.depth = 0
 	return r
 }
 
-// TODO: Generate a new region block with a predetermined size??? The goroutines are long-lived
 // newRegionBlock returns a new region block, either from the local free-list or as a large block from the heap
-func newRegionBlock(r *userRegion) *mspan {
+func newRegionBlock(r *userRegion, sz uintptr) *mspan {
 	var span *mspan
 
 	// If inner region block has released its memory, fetch these first from the local-free list
-	if !r.localFreeList.isEmpty() {
-		span = r.localFreeList.dequeue()
+	span = r.localFreeList.dequeue()
+	if span != nil {
+		base := span.base()
+
+		mheap_.initRegionBlock(span, base, span.npages)
+		setMemStatsAfterAlloc(span, 0)
+
+		// Pages from the local free list should not be returned to the global free list since they are not the first
+		// layer of the region
+		span.nestled = true
 	} else {
 		// If there are no memory in the local-free list, request memory from the heap
 		systemstack(func() {
-			span = mheap_.allocNewRegionBlock()
+			span = mheap_.allocNewRegionBlock(sz)
+
+			nbytes := span.elemsize
+			base := span.base()
+
+			for i := nbytes; i < regionBlockBytes-nbytes; i += nbytes {
+				lock(&mheap_.lock)
+				s := mheap_.allocMSpanLocked()
+				unlock(&mheap_.lock)
+
+				s.init(base+i, span.npages)
+				r.localFreeList.enqueue(s)
+			}
 		})
+
 		if span == nil {
 			throw("out of memory")
 		}
 	}
+
 	return span
 }
 
@@ -270,66 +309,76 @@ func newRegionBlock(r *userRegion) *mspan {
 // sysAlloc.
 //
 // returns a ready-to-use mspan with cleaned memory
-func (h *mheap) allocNewRegionBlock() *mspan {
+func (h *mheap) allocNewRegionBlock(sz uintptr) *mspan {
 	var s *mspan
 	var base uintptr
-	var nbytes uintptr
-	var npages uintptr
+	npages := regionBlockPages
 	created := 0
 
 	//If the global-free list is non-empty, take those first instead of calling sysAlloc
-	if !h.userArena.globalFreeList.isEmpty() {
-		s = h.userArena.globalFreeList.dequeue()
-		// Another goroutine may have fetched the value before us
-		if s != nil {
-			base = s.base()
-			npages = s.npages
-			nbytes = npages * pageSize
-		}
-	}
-
-	// If there were no value to be found in the global-free list, fetch a span from the heap
-	if s == nil {
-		nbytes = regionBlockBytes
-		npages = regionBlockPages
-
+	s = h.userArena.globalFreeList.dequeue()
+	if s != nil {
+		base = s.base()
+		npages = s.npages
+	} else { // If there were no value to be found in the global-free list, alloc space
 		lock(&h.lock)
 		// Allocates heap arena space, returns memory region in reserved state
-		v, size := h.sysAlloc(nbytes, &mheap_.userArena.arenaHints, &mheap_.userArenaArenas)
-		created++
+		v, size := h.sysAlloc(regionBlockBytes, &mheap_.userArena.arenaHints, &mheap_.userArenaArenas)
 		unlock(&h.lock)
-		if size%nbytes != 0 {
+		created++
+
+		if size%regionBlockBytes != 0 {
 			throw("sysAlloc size is not divisible by regionBlockBytes")
 		}
-		if size > nbytes {
+		if size > regionBlockBytes {
 			// We got more than we asked for. This can happen if
 			// heapArenaSize > regionBlockBytes, or if sysAlloc just returns
 			// some extra as a result of trying to find an aligned region.
 
-			for i := nbytes; i < size; i += nbytes {
+			for i := regionBlockBytes; i < size; i += regionBlockBytes {
 				lock(&h.lock)
 				s := h.allocMSpanLocked()
 				unlock(&h.lock)
-				s.init(uintptr(v)+i, npages)
+				s.init(uintptr(v)+i, regionBlockPages)
 				created++
 				h.userArena.globalFreeList.enqueue(s)
 			}
-			size = regionBlockBytes
 		}
 		base = uintptr(v)
 		if base == 0 {
 			// Out of memory.
 			return nil
 		}
+
 		lock(&h.lock)
 		// Allocates a mspan object, but h.lock must be held
 		s = h.allocMSpanLocked()
+		s.npages = regionBlockPages
 		unlock(&h.lock)
 	}
 
+	if sz < s.npages<<pageShift {
+		npages = sz >> pageShift
+		if npages == 0 || sz&(pageSize-1) != 0 {
+			npages++
+		}
+	}
+
+	h.initRegionBlock(s, base, npages)
+	setMemStatsAfterAlloc(s, created)
+
+	// Pages that are requested directly from the heap should be returned to the global-free list, not the local
+	// since it will be the first layer of region
+	s.nestled = false
+
+	return s
+}
+
+func (h *mheap) initRegionBlock(s *mspan, base uintptr, npages uintptr) *mspan {
 	// sysAlloc returns Reserved address space, and any span we're
 	// reusing is set to fault (so, also Reserved), so transition
 	// it to Prepared and then Ready.
+	nbytes := npages << pageShift
 	sysMap(unsafe.Pointer(base), nbytes, &gcController.heapReleased)
 	sysUsed(unsafe.Pointer(base), nbytes, nbytes)
 
@@ -337,9 +386,7 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 	spc := makeSpanClass(0, true)
 	h.initSpan(s, spanAllocHeap, spc, base, npages)
 	s.isUserArenaChunk = true
-	s.limit = s.base() + s.elemsize
-
-	setMemStatsAfterAlloc(s, created)
+	s.limit = s.base() + nbytes
 
 	// Clear the span preemptively. It's an region block, so let's assume
 	// everything is going to be used.
@@ -350,8 +397,7 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 	// gains are almost always worth it. Note: it's important that we
 	// clear even if it's freshly mapped and we know there's no point
 	// to zeroing as *that* is the critical signal to use huge pages.
-	memclrNoHeapPointers(unsafe.Pointer(s.base()), s.elemsize)
-	// has huge latency, necessary?
+	memclrNoHeapPointers(unsafe.Pointer(s.base()), nbytes)
 
 	s.needzero = 0
 
@@ -360,22 +406,19 @@ func (h *mheap) allocNewRegionBlock() *mspan {
 	// Set up the range for allocation.
 	s.userArenaChunkFree = makeAddrRange(base, base+s.elemsize)
 
-	// Pages that are requested directly from the heap should be returned to the global-free list, not the local
-	// since it will be the first layer of region
-	s.nestled = false
-
 	return s
 }
 
 // setMemStatsAfterAlloc updates the memstats with the new region block that has been allocated on the heap
 func setMemStatsAfterAlloc(s *mspan, created int) {
+	nbytes := s.npages << pageShift
 	// Account for this new arena chunk memory.
-	gcController.heapInUse.add(int64(s.npages * pageSize))
-	gcController.heapReleased.add(-int64(s.npages * pageSize))
+	gcController.heapInUse.add(int64(nbytes))
+	gcController.heapReleased.add(-int64(nbytes))
 
 	stats := memstats.heapStats.acquire()
-	atomic.Xaddint64(&stats.inHeap, int64(s.npages*pageSize))
-	atomic.Xaddint64(&stats.committed, int64(s.npages*pageSize))
+	atomic.Xaddint64(&stats.inHeap, int64(nbytes))
+	atomic.Xaddint64(&stats.committed, int64(nbytes))
 
 	// Model the arena as a single large malloc.
 	atomic.Xadd64(&stats.largeAlloc, int64(s.elemsize))
@@ -395,13 +438,15 @@ func setMemStatsAfterAlloc(s *mspan, created int) {
 
 // removeRegion is used by goroutines that no longer needs a reference of the region, ensuring that its content are
 // freed if no goroutine references it anymore
-func (r *userRegion) removeRegion() {
+func (r *userRegion) removeRegion() int {
 	refs := r.refs.Add(-1)
 	if refs == 0 {
 		r.freeUserRegion()
+		return 0
 	} else if refs < 0 {
 		panic("region double free")
 	}
+	return int(refs)
 }
 
 // freeUserRegion frees the current region block, and the full blocks from fullList
@@ -444,41 +489,27 @@ func (r *userRegion) freeUserRegionBlock(s *mspan, x unsafe.Pointer) {
 	// Also required by freeUserRegionBlock.
 	mp := acquirem()
 
-	// If not outer region, free pages to local free list to the parent region
-	if r.depth > 0 && s.nestled {
-		base := s.base()
-		// Clear memory
-		memclrNoHeapPointers(unsafe.Pointer(base), s.elemsize)
-		s.needzero = 0
+	base := s.base()
 
-		// Set up the range for allocation.
-		s.userArenaChunkFree = makeAddrRange(base, s.limit)
+	// Actually set the region block to fault, so we'll get dangling pointer errors.
+	// sysFault currently uses a method on each OS that forces it to evacuate all
+	// memory backing the chunk.
 
-		// enqueue the span to the localFreeList
+	//sysFault(unsafe.Pointer(base), s.elemsize)
+	sysUnused(unsafe.Pointer(base), s.elemsize)
+
+	setMemStatsAfterFree(s)
+
+	mheap_.pagesInUse.Add(-s.npages)
+	s.state.set(mSpanDead)
+
+	// Add the whole region-page to the global free list of the heap
+	if !s.nestled {
+		s.npages = regionBlockPages
+		mheap_.userArena.globalFreeList.enqueue(s)
+	} else if r.parent != nil {
+		// If not outer region, free pages to local free list to the parent region
 		r.parent.localFreeList.enqueue(s)
-	} else {
-		// If the span is nestled it means that the memory will be deallocated from its outer span
-		if !s.nestled {
-			// Actually set the region block to fault, so we'll get dangling pointer errors.
-			// sysFault currently uses a method on each OS that forces it to evacuate all
-			// memory backing the chunk.
-
-			sysFault(unsafe.Pointer(s.base()), s.npages*pageSize)
-
-			setMemStatsAfterFree(s)
-
-			mheap_.pagesInUse.Add(-s.npages)
-			s.state.set(mSpanDead)
-			// Add the page to the global free list of the heap
-			systemstack(func() {
-				mheap_.userArena.globalFreeList.enqueue(s)
-			})
-		} else {
-			// Free the nestled mspan
-			lock(&mheap_.lock)
-			mheap_.freeMSpanLocked(s)
-			unlock(&mheap_.lock)
-		}
 	}
 
 	KeepAlive(x)
@@ -490,7 +521,8 @@ func setMemStatsAfterFree(s *mspan) {
 	// Everything on the list is counted as in-use, however sysFault transitions to
 	// Reserved, not Prepared, so we skip updating heapFree or heapReleased and just
 	// remove the memory from the total altogether; it's just address space now.
-	gcController.heapInUse.add(-int64(s.npages * pageSize))
+	nbytes := int64(s.npages << pageShift)
+	gcController.heapInUse.add(-nbytes)
 
 	gcController.totalFree.Add(int64(s.elemsize))
 
@@ -499,8 +531,8 @@ func setMemStatsAfterFree(s *mspan) {
 	// We're non-preemptible, so it's safe to update consistent stats (our P
 	// won't change out from under us).
 	stats := memstats.heapStats.acquire()
-	atomic.Xaddint64(&stats.committed, -int64(s.npages*pageSize))
-	atomic.Xaddint64(&stats.inHeap, -int64(s.npages*pageSize))
+	atomic.Xaddint64(&stats.committed, -nbytes)
+	atomic.Xaddint64(&stats.inHeap, -nbytes)
 	atomic.Xadd64(&stats.largeFreeCount, 1)
 	atomic.Xadd64(&stats.largeFree, int64(s.elemsize))
 	atomic.Xadd64(&stats.regionDealloc, int64(s.elemsize))
@@ -535,40 +567,52 @@ func (r *userRegion) alloc(typ *_type) unsafe.Pointer {
 	s := r.current
 	x := s.bump(typ)
 
-	var unusedSpans []*mspan
+	var unusedList *mspan
 	// Try again, a result of the region block being full
 	for x == nil {
 		if s.userArenaChunkFree.size() > regionBlockMaxAllocBytes {
 			throw("wasted too much memory in an region block")
 		}
 		// If the block is unused, don't append it to fullList, return it to the local or global list
-		// after finding a suitable block
 		if s.isUnused() {
-			unusedSpans = append(unusedSpans, s)
-		}
-		// Fetch a new region block, and try to bump again
-		s = newRegionBlock(r)
-		x = s.bump(typ)
-
-		// Append the old block to the fullList
-		if x != nil {
+			s.next = unusedList
+			unusedList = s
+		} else { // Append the used block to the fullList
 			r.current.next = r.fullList
 			r.fullList = r.current
 		}
+		s = r.newRegionBlock(typ.Size_)
+		x = s.bump(typ)
 	}
 	r.current = s
 
-	// Place back the spans to the local free-list or free them to the global free-list
-	for _, u := range unusedSpans {
-		// If the span is nestled, we want to add it to our own localFreeList, not our parent's localFreeList
-		if u.nestled {
-			r.localFreeList.enqueue(u)
-		} else {
-			r.freeUserRegionBlock(u, unsafe.Pointer(u.base()))
-		}
+	// The unused blocks are returned afterward, otherwise we might iterate and fetch the same block again
+	for unusedList != nil {
+		// Currently the unused block will be placed on the parents local freelist not its own
+		r.freeUserRegionBlock(s, unsafe.Pointer(unusedList.base()))
+		unusedList = unusedList.next
 	}
 
 	return x
+}
+
+func (r *userRegion) newRegionBlock(sz uintptr) *mspan {
+	var s *mspan
+	if sz < r.current.elemsize {
+		sz = r.current.elemsize
+	} else {
+		sz = regionBlockMaxAllocBytes
+	}
+	// Fetch a new region block, and try to bump again
+	if r.parent != nil && sz < regionBlockMaxAllocBytes {
+		b := &abi.Type{Size_: sz, Align_: 1, Kind_: abi.Array}
+		systemstack(func() {
+			s = r.parent.newInnerRegionBlock(b)
+		})
+	} else {
+		s = newRegionBlock(r, sz)
+	}
+	return s
 }
 
 // isUnused returns true if the base address it the same as the bump-pointer of the region block
@@ -593,11 +637,13 @@ func (s *mspan) bump(typ *_type) unsafe.Pointer {
 	//
 	// Act like we're allocating.
 	mp := acquirem()
-	if mp.mallocing != 0 {
-		throw("malloc deadlock")
-	}
-	if mp.gsignal == getg() {
-		throw("malloc during signal")
+	if doubleCheckMalloc {
+		if mp.mallocing != 0 {
+			throw("malloc deadlock")
+		}
+		if mp.gsignal == getg() {
+			throw("malloc during signal")
+		}
 	}
 	mp.mallocing = 1
 
@@ -608,23 +654,19 @@ func (s *mspan) bump(typ *_type) unsafe.Pointer {
 		ptr = unsafe.Pointer(v)
 		// Update the internal fragmentation of the region block
 		stats := memstats.heapStats.acquire()
-
-		// TODO: Make IntFrag work properly, for both heapAlloc and regionAlloc
 		atomic.Xadd64(&stats.regionIntFrag, -int64(s.userArenaChunkFree.base.a-v))
 		memstats.heapStats.release()
 	}
+	mp.mallocing = 0
+	releasem(mp)
+
 	if ptr == nil {
 		// Failed to allocate.
-		mp.mallocing = 0
-		releasem(mp)
 		return nil
 	}
 	if s.needzero != 0 {
 		throw("region block needs zeroing, but should already be zeroed")
 	}
-
-	mp.mallocing = 0
-	releasem(mp)
 
 	return ptr
 }
@@ -645,24 +687,20 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 	}
 
 	mem, overflow := math.MulUintptr(elem.Size_, uintptr(size))
-	if overflow || mem > maxAlloc-hchanSize || size < 0 {
+	if overflow || mem > regionBlockMaxAllocBytes || size < 0 {
 		panic(plainError("makechan: size out of range"))
 	}
 
 	lock(&r.lock)
-	var c *hchan
+	c := (*hchan)(r.alloc(abi.TypeOf(hchan{})))
 	switch {
 	case mem == 0:
 		//unbuffered channel
-		c = (*hchan)(r.alloc(abi.TypeOf(hchan{})))
 		c.buf = r.alloc(elem)
 	default:
 		//buffered channel
-		c = (*hchan)(r.alloc(abi.TypeOf(hchan{})))
-		for i := 0; i < size; i++ {
-			r.alloc(elem)
-			c.refs = append(c.refs, r.alloc(elem))
-		}
+		b := &abi.Type{Size_: mem, Align_: 1, Kind_: abi.Array}
+		c.buf = r.alloc(b)
 	}
 	unlock(&r.lock)
 
@@ -700,7 +738,7 @@ func (r *userRegion) incrementCounter() bool {
 //
 // The method also handle references of nestled regions, decrementing the outer regions counter.
 // Each incrementCounter needs a corresponding decrementCounter
-func (r *userRegion) decrementCounter() {
+func (r *userRegion) decrementCounter() int {
 	refs := r.refs.Add(-1)
 	parent := r.parent
 	if refs == 0 { // No goroutine is accessing the memory
@@ -709,42 +747,40 @@ func (r *userRegion) decrementCounter() {
 		panic("region double free")
 	}
 	if parent != nil {
-		r.parent.decrementCounter()
+		return r.parent.decrementCounter()
+	} else {
+		return int(refs)
 	}
 }
 
 // allocateInnerRegion returns a userRegion within the parent region with a predetermined size depending on
 // the depth of the child region
 func (r *userRegion) allocateInnerRegion(sz int) *userRegion {
-	// Currently only able to allocate on a depth of 3
-	if r.depth > 2 {
-		panic("Can't allocate deeper than a depth of 3")
+	npages := sz >> pageShift
+
+	// Round up the number of pages used in this block
+	if npages == 0 || sz&(pageSize-1) != 0 {
+		npages++
 	}
 
+	sz = npages << pageShift
+
 	lock(&r.lock)
+	if sz > int(regionBlockMaxAllocBytes) || sz > int(r.current.elemsize) {
+		panic("Inner region too large for outer region block")
+	} else if sz <= 0 {
+		panic("Inner region too small for outer region block")
+	}
+
 	// Initialize the inner region
 	inner := (*userRegion)(r.alloc(abi.TypeOf(userRegion{})))
 	unlock(&r.lock)
+
 	inner.parent = r
 	inner.localFreeList = &concurrentFreeList[*mspan]{}
 	inner.localFreeList.init()
 	inner.depth = r.depth + 1
 	inner.refs.Store(1)
-
-	npages := sz / pageSize
-
-	// Round up the number of pages used in this block
-	if npages == 0 {
-		npages++
-	}
-
-	sz = npages * pageSize
-
-	if sz > regionBlockBytesMax {
-		panic("Inner region too large for outer region block")
-	} else if sz <= 0 {
-		panic("Inner region too small for outer region block")
-	}
 
 	b := &abi.Type{Size_: uintptr(sz), Align_: 1, Kind_: abi.Array}
 
@@ -759,20 +795,21 @@ func (r *userRegion) allocateInnerRegion(sz int) *userRegion {
 // This block is used by the inner region to store data
 func (r *userRegion) newInnerRegionBlock(block *_type) *mspan {
 	// Allocates a block to the outer region with a predetermined size
-	startAddr := r.current.startAddr
-	base := r.current.userArenaChunkFree.base.a
 	lock(&r.lock)
-	r.alloc(block)
-	// We may have to update the base address if we had to allocate a new block for the inner region
-	if r.current.startAddr != startAddr {
-		base = r.current.startAddr
-	}
+	base := r.alloc(block)
+
 	limit := r.current.userArenaChunkFree.base.a
 	unlock(&r.lock)
 
 	// The range of the inner region is the bounds before and after allocation on the parent
-	s := r.generateSpanFromRange(base, limit)
+	s := r.generateSpanFromRange(uintptr(base), limit)
 	s.nestled = true // the span is allocated at a depth > 0, therefore it is nestled
+
+	/*
+		stats := memstats.heapStats.acquire()
+		atomic.Xadd64(&stats.regionIntFrag, int64(s.elemsize))
+		memstats.heapStats.release()*/
+
 	return s
 }
 
@@ -783,11 +820,11 @@ func (r *userRegion) generateSpanFromRange(base uintptr, limit uintptr) *mspan {
 	// Generate a new address range based on base and limit
 	rng := makeAddrRange(base, limit)
 	nbytes := rng.size() // The number of bytes that the range contains
-	if nbytes%pageSize != 0 {
-		panic("Number of bytes in region aren't divisible by pageSize")
+	if nbytes&(pageSize-1) != 0 {
+		panic("Number of bytes in region aren't divisible by pageSize, ")
 	}
 
-	npages := nbytes / pageSize
+	npages := nbytes >> pageShift
 
 	lock(&mheap_.lock)
 	s := mheap_.allocMSpanLocked()
@@ -803,53 +840,3 @@ func (r *userRegion) generateSpanFromRange(base uintptr, limit uintptr) *mspan {
 
 	return s
 }
-
-/*
-
-// freeUnusedMemory is a method that frees the end of the region block that aren't used. Useful when it is
-// known that the region isn't going to allocate any more memory, making the pages useful for other regions
-//
-// If the region block is nestled, the end of the block is freed to the local free-list, otherwise it is returned
-// to the global free-list.
-func (r *userRegion) freeUnusedMemory() {
-	// Fetch the current base and limit of the region block
-	base := r.current.userArenaChunkFree.base.a
-	limit := r.current.limit
-
-	nbytes := base - r.current.startAddr // Current amount of bytes used in this block
-	npages := nbytes / pageSize
-
-	// The region block left cannot be lesser size than a small block
-	if npages*pageSize < smallInnerRegionBlockBytes {
-		npages = smallInnerRegionBlockBytes / pageSize
-	}
-
-	// Round up the number of pages used in this block
-	if nbytes%pageSize != 0 {
-		npages++
-	}
-
-	// No point of freeing the unused memory if the memory to be freed is lesser than a small block
-	if r.current.elemsize-npages*pageSize > smallInnerRegionBlockBytes {
-		r.current.elemsize = npages * pageSize
-
-		// Declare the new limit where this block ends
-		newLimit := r.current.startAddr + r.current.elemsize
-
-		// Set the limit to the base
-		r.current.limit = newLimit
-		r.current.userArenaChunkFree.limit.a = newLimit
-		r.current.npages = npages
-		// Generate a new span out of the unused memory in the region block
-
-		var s *mspan
-		systemstack(func() {
-			s = r.generateSpanFromRange(newLimit, limit)
-		})
-
-		if s != nil {
-			// Free the region block that is unused, either to the local or global free-list
-			r.freeUserRegionBlock(s, unsafe.Pointer(s.base()))
-		}
-	}
-}*/

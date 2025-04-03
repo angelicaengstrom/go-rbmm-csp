@@ -45,7 +45,7 @@ type hchan struct {
 	recvq         waitq  // list of recv waiters
 	sendq         waitq  // list of send waiters
 	isregionblock bool
-	refs          []unsafe.Pointer // need refs if it is region block
+	//refs          []unsafe.Pointer // need refs if it is region block
 
 	// lock protects all fields in hchan, as well as several
 	// fields in sudogs blocked on this channel.
@@ -141,7 +141,10 @@ func chanbuf(c *hchan, i uint) unsafe.Pointer {
 	return add(c.buf, uintptr(i)*uintptr(c.elemsize))
 }
 
-func chanregionbuf(c *hchan, i uint) unsafe.Pointer { return c.refs[i] }
+func chanregionbuf(c *hchan, i uint) unsafe.Pointer {
+	return add(c.buf, uintptr(i)*uintptr(c.elemsize))
+	//return c.refs[i]
+}
 
 // full reports whether a send on c would block (that is, the channel is full).
 // It uses a single word-sized read of mutable state, so although

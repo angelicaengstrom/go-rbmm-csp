@@ -473,12 +473,122 @@ func TestAllocMatrix(t *testing.T) {
 
 func TestAllocInnerRegion(t *testing.T) {
 	t.Run("inner", func(t *testing.T) {
+		var memStats runtime.MemStats
 		outer := region.CreateRegion()
-		inner := region.AllocInnerRegion(8200, outer)
 
-		_ = region.AllocFromRegion[int](inner)
+		runtime.ReadMemStats(&memStats)
+		t.Log(memStats.RegionIntFrag)
+
+		inner := region.AllocInnerRegion(8000, outer)
+
+		runtime.ReadMemStats(&memStats)
+		t.Log(memStats.RegionIntFrag)
+
+		_ = region.AllocFromRegion[[4000]byte](inner)
+
+		runtime.ReadMemStats(&memStats)
+		t.Log(memStats.RegionIntFrag)
 
 		inner.RemoveRegion()
+		runtime.ReadMemStats(&memStats)
+		t.Log(memStats.RegionIntFrag)
 		outer.RemoveRegion()
+
+		runtime.ReadMemStats(&memStats)
+		t.Log(memStats.RegionIntFrag)
+	})
+}
+
+func TestAllocInnerReusalRegion(t *testing.T) {
+	t.Run("innerReusal", func(t *testing.T) {
+		outer := region.CreateRegion()
+		done := region.AllocChannel[bool](0, outer)
+		res := region.AllocChannel[bool](0, outer)
+		outer.IncRefCounter()
+		go func() {
+			for i := region.AllocFromRegion[int](outer); *i < 10000; *i++ {
+				inner := region.AllocInnerRegion(0, outer)
+				res <- true
+				inner.RemoveRegion()
+			}
+			outer.DecRefCounter()
+			done <- true
+		}()
+
+		outer.IncRefCounter()
+		go func() {
+			for i := region.AllocFromRegion[int](outer); *i < 10000; *i++ {
+				<-res
+			}
+			outer.DecRefCounter()
+			done <- true
+		}()
+
+		<-done
+		<-done
+
+		outer.RemoveRegion()
+	})
+}
+
+func TestAllocMatrixRegion(t *testing.T) {
+	t.Run("matrix", func(t *testing.T) {
+		r1 := region.CreateRegion()
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+		t.Log(memStats.RegionInUse)
+		t.Log(memStats.RegionIntFrag)
+
+		matrix := region.AllocFromRegion[[2048]*[2048]int](r1)
+		for i := 0; i < 2048; i++ {
+			(*matrix)[i] = region.AllocFromRegion[[2048]int](r1)
+		}
+
+		runtime.ReadMemStats(&memStats)
+		t.Log("Finish")
+		t.Log(memStats.RegionInUse)
+		t.Log(memStats.RegionIntFrag)
+
+		r1.RemoveRegion()
+		runtime.ReadMemStats(&memStats)
+		t.Log("Finish")
+		t.Log(memStats.RegionInUse)
+		t.Log(memStats.RegionIntFrag)
+	})
+}
+
+func TestAllocChannelRegion(t *testing.T) {
+	t.Run("channel", func(t *testing.T) {
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+		heapBefore := memStats.HeapAlloc
+
+		r1 := region.CreateRegion()
+
+		runtime.ReadMemStats(&memStats)
+		t.Log("Before alloc")
+		t.Log(memStats.HeapAlloc - heapBefore)
+
+		ch := region.AllocChannel[smallScalar](300*300, r1)
+
+		go func() {
+			for i := 0; i < 300*300; i++ {
+				<-ch
+			}
+		}()
+
+		for i := 0; i < 300*300; i++ {
+			ch <- smallScalar{1}
+		}
+
+		runtime.ReadMemStats(&memStats)
+		t.Log("After alloc")
+		t.Log(memStats.HeapAlloc - heapBefore)
+
+		time.Sleep(time.Millisecond)
+		r1.RemoveRegion()
+		runtime.ReadMemStats(&memStats)
+		t.Log("After remove")
+		t.Log(memStats.HeapAlloc - heapBefore)
 	})
 }

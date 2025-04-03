@@ -46,16 +46,16 @@ type Region struct {
 }
 
 // CreateRegion allocates a new region.
-func CreateRegion() *Region {
-	return &Region{r: runtime_region_createRegion(0)}
+func CreateRegion(size int) *Region {
+	return &Region{r: runtime_region_createRegion(size)}
 }
 
 // RemoveRegion frees the region (and all objects allocated from the region) so that
 // memory backing the region can be reused fairly quickly without garbage
 // collection overhead. Applications must not call any method on this
 // region after it has been freed.
-func (r *Region) RemoveRegion() {
-	runtime_region_removeRegion(r.r)
+func (r *Region) RemoveRegion() int {
+	return runtime_region_removeRegion(r.r)
 }
 
 // AllocFromRegion creates a new *T in the provided region. The *T must not be used after
@@ -73,10 +73,10 @@ func AllocInnerRegion(size int, r *Region) *Region {
 // CreateChannel creates a new chan in the provided region. The chan must not be used after
 // the region is freed. Accessing the value after free may result in a fault,
 // but this fault is also not guaranteed.
-func CreateChannel[T any](size int) (chan T, *Region) {
+/*func CreateChannel[T any](size int) (chan T, *Region) {
 	r := CreateRegion()
 	return AllocChannel[T](size, r), r
-}
+}*/
 
 func AllocChannel[T any](size int, r *Region) chan T {
 	var ch chan T
@@ -89,7 +89,7 @@ func (r *Region) IncRefCounter() bool {
 	return runtime_region_incRefCounter(r.r)
 }
 
-func (r *Region) DecRefCounter() { runtime_region_decRefCounter(r.r) }
+func (r *Region) DecRefCounter() int { return runtime_region_decRefCounter(r.r) }
 
 //go:linkname reflect_region_allocFromRegion reflect.region_allocFromRegion
 func reflect_region_allocFromRegion(r *Region, typ any) any {
@@ -103,7 +103,7 @@ func runtime_region_createRegion(nbytes int) unsafe.Pointer
 func runtime_region_allocFromRegion(region unsafe.Pointer, typ any) any
 
 //go:linkname runtime_region_removeRegion
-func runtime_region_removeRegion(region unsafe.Pointer)
+func runtime_region_removeRegion(region unsafe.Pointer) int
 
 //go:linkname runtime_region_createChannel
 func runtime_region_createChannel(region unsafe.Pointer, typ any, size int) unsafe.Pointer
@@ -115,4 +115,4 @@ func runtime_region_allocNestledRegion(region unsafe.Pointer, size int) unsafe.P
 func runtime_region_incRefCounter(region unsafe.Pointer) bool
 
 //go:linkname runtime_region_decRefCounter
-func runtime_region_decRefCounter(region unsafe.Pointer)
+func runtime_region_decRefCounter(region unsafe.Pointer) int
