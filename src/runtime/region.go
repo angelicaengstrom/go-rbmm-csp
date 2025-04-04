@@ -154,10 +154,6 @@ type userRegion struct {
 	// nil if the region is non-nestled
 	parent *userRegion
 
-	// depth is the current depth of the inner region, used to allocate a proper inner size
-	// 0 if the region is non-nestled
-	depth uintptr
-
 	lock mutex
 }
 
@@ -260,7 +256,6 @@ func createUserRegion(sz uintptr) *userRegion {
 	r.current = newRegionBlock(r, sz)
 	r.refs.Store(1)
 	r.parent = nil
-	r.depth = 0
 	return r
 }
 
@@ -707,7 +702,6 @@ func (r *userRegion) makeChan(t *_type, size int) *hchan {
 	c.elemsize = uint16(elem.Size_)
 	c.elemtype = elem
 	c.dataqsiz = uint(size)
-	c.isregionblock = true
 	lockInit(&c.lock, lockRankHchan)
 
 	// Since the entire buffer is already allocated, it is ok to free here
@@ -753,8 +747,7 @@ func (r *userRegion) decrementCounter() int {
 	}
 }
 
-// allocateInnerRegion returns a userRegion within the parent region with a predetermined size depending on
-// the depth of the child region
+// allocateInnerRegion returns a userRegion within the parent region with a predetermined size
 func (r *userRegion) allocateInnerRegion(sz int) *userRegion {
 	npages := sz >> pageShift
 
@@ -779,7 +772,6 @@ func (r *userRegion) allocateInnerRegion(sz int) *userRegion {
 	inner.parent = r
 	inner.localFreeList = &concurrentFreeList[*mspan]{}
 	inner.localFreeList.init()
-	inner.depth = r.depth + 1
 	inner.refs.Store(1)
 
 	b := &abi.Type{Size_: uintptr(sz), Align_: 1, Kind_: abi.Array}

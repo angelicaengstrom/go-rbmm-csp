@@ -32,20 +32,18 @@ const (
 )
 
 type hchan struct {
-	qcount        uint           // total data in the queue
-	dataqsiz      uint           // size of the circular queue
-	buf           unsafe.Pointer // points to an array of dataqsiz elements
-	elemsize      uint16
-	synctest      bool // true if created in a synctest bubble
-	closed        uint32
-	timer         *timer // timer feeding this chan
-	elemtype      *_type // element type
-	sendx         uint   // send index
-	recvx         uint   // receive index
-	recvq         waitq  // list of recv waiters
-	sendq         waitq  // list of send waiters
-	isregionblock bool
-	//refs          []unsafe.Pointer // need refs if it is region block
+	qcount   uint           // total data in the queue
+	dataqsiz uint           // size of the circular queue
+	buf      unsafe.Pointer // points to an array of dataqsiz elements
+	elemsize uint16
+	synctest bool // true if created in a synctest bubble
+	closed   uint32
+	timer    *timer // timer feeding this chan
+	elemtype *_type // element type
+	sendx    uint   // send index
+	recvx    uint   // receive index
+	recvq    waitq  // list of recv waiters
+	sendq    waitq  // list of send waiters
 
 	// lock protects all fields in hchan, as well as several
 	// fields in sudogs blocked on this channel.
@@ -243,11 +241,7 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	if c.qcount < c.dataqsiz {
 		// Space is available in the channel buffer. Enqueue the element to send.
 		var qp unsafe.Pointer
-		if c.isregionblock {
-			qp = chanregionbuf(c, c.sendx)
-		} else {
-			qp = chanbuf(c, c.sendx)
-		}
+		qp = chanbuf(c, c.sendx)
 		if raceenabled {
 			racenotify(c, c.sendx, nil)
 		}
@@ -267,7 +261,6 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	}
 
 	// Block on the channel. Some receiver will complete our operation for us.
-	//TODO: Integrate goroutines with channel
 	gp := getg()
 	mysg := acquireSudog()
 	mysg.releasetime = 0
@@ -381,11 +374,7 @@ func timerchandrain(c *hchan) bool {
 	any := false
 	for c.qcount > 0 {
 		any = true
-		if c.isregionblock {
-			typedmemclr(c.elemtype, chanregionbuf(c, c.recvx))
-		} else {
-			typedmemclr(c.elemtype, chanbuf(c, c.recvx))
-		}
+		typedmemclr(c.elemtype, chanbuf(c, c.recvx))
 
 		c.recvx++
 		if c.recvx == c.dataqsiz {
@@ -628,11 +617,7 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 	if c.qcount > 0 {
 		// Receive directly from queue
 		var qp unsafe.Pointer
-		if c.isregionblock {
-			qp = chanregionbuf(c, c.recvx)
-		} else {
-			qp = chanbuf(c, c.recvx)
-		}
+		qp = chanbuf(c, c.recvx)
 		if raceenabled {
 			racenotify(c, c.recvx, nil)
 		}
@@ -741,11 +726,7 @@ func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 		// its item at the tail of the queue. Since the
 		// queue is full, those are both the same slot.
 		var qp unsafe.Pointer
-		if c.isregionblock {
-			qp = chanregionbuf(c, c.recvx)
-		} else {
-			qp = chanbuf(c, c.recvx)
-		}
+		qp = chanbuf(c, c.recvx)
 		if raceenabled {
 			racenotify(c, c.recvx, nil)
 			racenotify(c, c.recvx, sg)
@@ -956,17 +937,10 @@ func (c *hchan) raceaddr() unsafe.Pointer {
 }
 
 func racesync(c *hchan, sg *sudog) {
-	if c.isregionblock {
-		racerelease(chanregionbuf(c, 0))
-		raceacquireg(sg.g, chanregionbuf(c, 0))
-		racereleaseg(sg.g, chanregionbuf(c, 0))
-		raceacquire(chanregionbuf(c, 0))
-	} else {
-		racerelease(chanbuf(c, 0))
-		raceacquireg(sg.g, chanbuf(c, 0))
-		racereleaseg(sg.g, chanbuf(c, 0))
-		raceacquire(chanbuf(c, 0))
-	}
+	racerelease(chanbuf(c, 0))
+	raceacquireg(sg.g, chanbuf(c, 0))
+	racereleaseg(sg.g, chanbuf(c, 0))
+	raceacquire(chanbuf(c, 0))
 }
 
 // Notify the race detector of a send or receive involving buffer entry idx
@@ -981,11 +955,7 @@ func racenotify(c *hchan, idx uint, sg *sudog) {
 	// of elemsize==0, yet the race detector can be made to handle multiple
 	// sync objects underneath the hood (one sync object per idx)
 	var qp unsafe.Pointer
-	if c.isregionblock {
-		qp = chanregionbuf(c, idx)
-	} else {
-		qp = chanbuf(c, idx)
-	}
+	qp = chanbuf(c, idx)
 	// When elemsize==0, we don't allocate a full buffer for the channel.
 	// Instead of individual buffer entries, the race detector uses the
 	// c.buf as the only buffer entry.  This simplification prevents us from
