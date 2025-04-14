@@ -269,9 +269,9 @@ func newRegionBlock(r *userRegion, sz uintptr) *mspan {
 		base := span.base()
 
 		mheap_.initRegionBlock(span, base, span.npages)
-		setMemStatsAfterAlloc(span, 0)
+		setMemStatsAfterAlloc(span, 1)
 
-		// Pages from the local free list should not be returned to the global free list since they are not the first
+		// Pages from the local free list should be returned to the local free list since they are not the first
 		// layer of the region
 		span.nestled = true
 	} else {
@@ -285,6 +285,7 @@ func newRegionBlock(r *userRegion, sz uintptr) *mspan {
 			for i := nbytes; i < regionBlockBytes-nbytes; i += nbytes {
 				lock(&mheap_.lock)
 				s := mheap_.allocMSpanLocked()
+				s.needzero = 1
 				unlock(&mheap_.lock)
 
 				s.init(base+i, span.npages)
@@ -333,6 +334,7 @@ func (h *mheap) allocNewRegionBlock(sz uintptr) *mspan {
 			for i := regionBlockBytes; i < size; i += regionBlockBytes {
 				lock(&h.lock)
 				s := h.allocMSpanLocked()
+				s.needzero = 1
 				unlock(&h.lock)
 				s.init(uintptr(v)+i, regionBlockPages)
 				created++
@@ -349,6 +351,7 @@ func (h *mheap) allocNewRegionBlock(sz uintptr) *mspan {
 		// Allocates a mspan object, but h.lock must be held
 		s = h.allocMSpanLocked()
 		s.npages = regionBlockPages
+		s.needzero = 1
 		unlock(&h.lock)
 	}
 
@@ -374,8 +377,10 @@ func (h *mheap) initRegionBlock(s *mspan, base uintptr, npages uintptr) *mspan {
 	// reusing is set to fault (so, also Reserved), so transition
 	// it to Prepared and then Ready.
 	nbytes := npages << pageShift
-	sysMap(unsafe.Pointer(base), nbytes, &gcController.heapReleased)
-	sysUsed(unsafe.Pointer(base), nbytes, nbytes)
+	if !s.nestled {
+		sysMap(unsafe.Pointer(base), nbytes, &gcController.heapReleased)
+		sysUsed(unsafe.Pointer(base), nbytes, nbytes)
+	}
 
 	// Model the user region as a heap span for a large object.
 	spc := makeSpanClass(0, true)
@@ -392,9 +397,10 @@ func (h *mheap) initRegionBlock(s *mspan, base uintptr, npages uintptr) *mspan {
 	// gains are almost always worth it. Note: it's important that we
 	// clear even if it's freshly mapped and we know there's no point
 	// to zeroing as *that* is the critical signal to use huge pages.
-	memclrNoHeapPointers(unsafe.Pointer(s.base()), nbytes)
-
-	s.needzero = 0
+	if s.needzero == 1 {
+		memclrNoHeapPointers(unsafe.Pointer(s.base()), nbytes)
+		s.needzero = 0
+	}
 
 	s.freeIndexForScan = 1
 
@@ -466,7 +472,6 @@ func (r *userRegion) freeUserRegion() {
 
 	// nil out r.current so that a race with freeing will more likely cause a crash.
 	r.current = nil
-	r = nil
 }
 
 // freeUserRegionBlock releases the user region represented by s back to the runtime.
@@ -489,10 +494,8 @@ func (r *userRegion) freeUserRegionBlock(s *mspan, x unsafe.Pointer) {
 	// Actually set the region block to fault, so we'll get dangling pointer errors.
 	// sysFault currently uses a method on each OS that forces it to evacuate all
 	// memory backing the chunk.
-
-	//sysFault(unsafe.Pointer(base), s.elemsize)
-	sysUnused(unsafe.Pointer(base), s.elemsize)
-
+	memclrNoHeapPointers(unsafe.Pointer(base), s.elemsize)
+	s.needzero = 0
 	setMemStatsAfterFree(s)
 
 	mheap_.pagesInUse.Add(-s.npages)
@@ -517,20 +520,20 @@ func setMemStatsAfterFree(s *mspan) {
 	// Reserved, not Prepared, so we skip updating heapFree or heapReleased and just
 	// remove the memory from the total altogether; it's just address space now.
 	nbytes := int64(s.npages << pageShift)
-	gcController.heapInUse.add(-nbytes)
+		gcController.heapInUse.add(-nbytes)
 
-	gcController.totalFree.Add(int64(s.elemsize))
+		gcController.totalFree.Add(int64(s.elemsize))
 
 	// Update consistent stats to match.
 	//
 	// We're non-preemptible, so it's safe to update consistent stats (our P
 	// won't change out from under us).
 	stats := memstats.heapStats.acquire()
-	atomic.Xaddint64(&stats.committed, -nbytes)
-	atomic.Xaddint64(&stats.inHeap, -nbytes)
-	atomic.Xadd64(&stats.largeFreeCount, 1)
-	atomic.Xadd64(&stats.largeFree, int64(s.elemsize))
-	atomic.Xadd64(&stats.regionDealloc, int64(s.elemsize))
+		atomic.Xaddint64(&stats.committed, -nbytes)
+		atomic.Xaddint64(&stats.inHeap, -nbytes)
+		atomic.Xadd64(&stats.largeFreeCount, 1)
+		atomic.Xadd64(&stats.largeFree, int64(s.elemsize))
+		atomic.Xadd64(&stats.regionDealloc, int64(s.elemsize))
 
 	atomic.Xadd64(&stats.regionIntFrag, -int64(s.limit-s.userArenaChunkFree.base.a))
 	memstats.heapStats.release()
@@ -605,6 +608,7 @@ func (r *userRegion) newRegionBlock(sz uintptr) *mspan {
 			s = r.parent.newInnerRegionBlock(b)
 		})
 	} else {
+		//print("full...\n")
 		s = newRegionBlock(r, sz)
 	}
 	return s
@@ -643,13 +647,14 @@ func (s *mspan) bump(typ *_type) unsafe.Pointer {
 	mp.mallocing = 1
 
 	var ptr unsafe.Pointer
+	b := s.userArenaChunkFree.base.a
 
 	v, ok := s.userArenaChunkFree.takeFromFront(size, typ.Align_)
 	if ok {
 		ptr = unsafe.Pointer(v)
 		// Update the internal fragmentation of the region block
 		stats := memstats.heapStats.acquire()
-		atomic.Xadd64(&stats.regionIntFrag, -int64(s.userArenaChunkFree.base.a-v))
+		atomic.Xadd64(&stats.regionIntFrag, -int64(s.userArenaChunkFree.base.a-b))
 		memstats.heapStats.release()
 	}
 	mp.mallocing = 0
@@ -797,10 +802,10 @@ func (r *userRegion) newInnerRegionBlock(block *_type) *mspan {
 	s := r.generateSpanFromRange(uintptr(base), limit)
 	s.nestled = true // the span is allocated at a depth > 0, therefore it is nestled
 
-	/*
-		stats := memstats.heapStats.acquire()
-		atomic.Xadd64(&stats.regionIntFrag, int64(s.elemsize))
-		memstats.heapStats.release()*/
+	
+	stats := memstats.heapStats.acquire()
+	atomic.Xadd64(&stats.regionIntFrag, int64(s.elemsize))
+	memstats.heapStats.release()
 
 	return s
 }
